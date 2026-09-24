@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fillVariables } from "./callbot";
-import { probeVoiceApi, synthesizeSpeech, transcribeSpeech } from "./voiceApi";
-import { AudioCache, nextPrefetchIndex, speechCacheKey } from "./voiceCache";
+import { probeVoiceApi, openSpeechStream, synthesizeSpeech, transcribeSpeech } from "./voiceApi";
+import { AudioCache, mseMp3Supported, nextPrefetchIndex, playMp3Stream, speechCacheKey, type StreamPlayback } from "./voiceCache";
 import type { CallbotCampaign, CallbotScriptStep, Customer } from "./types";
 
 /**
@@ -126,6 +126,7 @@ export function useSpeech(voiceLabel?: string): UseSpeechValue {
   const [backend, setBackend] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const cancelledRef = useRef(false);
+  const streamingRef = useRef<StreamPlayback | null>(null);
 
   // Dò backend một lần khi hook được dùng; không có thì im lặng lùi về trình duyệt.
   useEffect(() => {
@@ -163,6 +164,9 @@ export function useSpeech(voiceLabel?: string): UseSpeechValue {
 
   const stop = useCallback(() => {
     cancelledRef.current = true;
+    // Dừng cả luồng streaming đang phát, không chỉ thẻ audio.
+    streamingRef.current?.stop();
+    streamingRef.current = null;
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current = null;
@@ -225,36 +229,77 @@ export function useSpeech(voiceLabel?: string): UseSpeechValue {
     [supported, applyProfile],
   );
 
+  /** Có nên phát dần không: chỉ khi trình duyệt hỗ trợ MP3 qua MediaSource. */
+  const streamingEnabled = useCallback(() => mseMp3Supported(), []);
+
+  /** Phát audio đã có sẵn trong bộ nhớ (blob); trả true khi phát xong bình thường. */
+  const playBlob = useCallback(
+    async (blob: Blob, id: string): Promise<boolean> => {
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      const release = () => {
+        URL.revokeObjectURL(url);
+        if (audioRef.current === audio) audioRef.current = null;
+      };
+      try {
+        await new Promise<void>((resolve, reject) => {
+          audio.onended = () => resolve();
+          audio.onerror = () => reject(new Error("phát audio thất bại"));
+          audio.play().then(undefined, reject);
+        });
+        setSpeakingId((current) => (current === id ? null : current));
+        release();
+        return true;
+      } catch {
+        release();
+        return false;
+      }
+    },
+    [],
+  );
+
   /** Đọc một đoạn bằng audio của backend; trả false nếu backend lỗi để gọi chỗ lùi. */
   const speakViaBackend = useCallback(
     async (text: string, id: string): Promise<boolean> => {
+      const key = speechCacheKey(text, voiceLabel ?? "");
+
+      // Câu đã tổng hợp trước đó (bấm lại, chạy lại mô phỏng) phát ngay, không gọi mạng.
+      const cached = audioCache.get(key);
+      if (cached) {
+        return playBlob(cached, id);
+      }
+
+      // Chưa có đệm: nếu trình duyệt phát dần MP3 được thì nghe sớm hơn hẳn đợi cả tệp
+      // (đã kiểm chứng trên Chrome: SourceBuffer nhận đủ audio edge-tts). Trình duyệt
+      // không hỗ trợ (thường là Firefox) thì lùi về tải cả tệp.
+      if (streamingEnabled()) {
+        try {
+          const response = await openSpeechStream(text, voiceLabel ?? "");
+          if (cancelledRef.current) return true;
+          const playback = playMp3Stream(response, audioRef);
+          setSpeakingId(id);
+          streamingRef.current = playback;
+          await playback.done;
+          if (streamingRef.current === playback) streamingRef.current = null;
+          setSpeakingId((current) => (current === id ? null : current));
+          return true;
+        } catch {
+          // Rơi xuống đường tải cả tệp bên dưới.
+        }
+      }
+
       try {
-        // Câu đã tổng hợp trước đó (bấm lại, chạy lại mô phỏng) phát ngay, không gọi mạng.
-        const key = speechCacheKey(text, voiceLabel ?? "");
-        const cached = audioCache.get(key);
-        const blob = cached ?? (await synthesizeSpeech(text, voiceLabel ?? ""));
-        if (!cached) audioCache.set(key, blob);
+        const blob = await synthesizeSpeech(text, voiceLabel ?? "");
+        audioCache.set(key, blob);
         // Người dùng có thể đã bấm dừng trong lúc chờ mạng; đừng phát nữa.
         if (cancelledRef.current) return true;
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        audioRef.current = audio;
-        audio.onended = () => {
-          URL.revokeObjectURL(url);
-          setSpeakingId((current) => (current === id ? null : current));
-        };
-        audio.onerror = () => {
-          URL.revokeObjectURL(url);
-          setSpeakingId((current) => (current === id ? null : current));
-        };
-        await audio.play();
-        setSpeakingId(id);
-        return true;
+        return playBlob(blob, id);
       } catch {
         return false;
       }
     },
-    [voiceLabel],
+    [voiceLabel, playBlob, streamingEnabled],
   );
 
   const speak = useCallback(

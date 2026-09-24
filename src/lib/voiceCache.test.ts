@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AudioCache, nextPrefetchIndex, speechCacheKey } from "./voiceCache.ts";
+import { AudioCache, mseMp3Supported, nextPrefetchIndex, speechCacheKey } from "./voiceCache.ts";
 
 // Blob có sẵn trong Node 18+; dùng chuỗi bọc lại cho gọn.
 const blob = (label: string) => new Blob([label]);
@@ -104,5 +104,50 @@ describe("quyết định tải trước", () => {
 
   it("không tải trước khi danh sách rỗng", () => {
     assert.equal(nextPrefetchIndex([], 0, () => false), null);
+  });
+});
+
+describe("kiểm tra hỗ trợ MediaSource MP3", () => {
+  const withMediaSource = (isTypeSupported: () => boolean, run: () => void) => {
+    const hadWindow = "window" in globalThis;
+    const original = (globalThis as { window?: unknown }).window;
+    (globalThis as { window?: unknown }).window = { MediaSource: { isTypeSupported } };
+    try {
+      run();
+    } finally {
+      // Gán lại giá trị cũ (undefined nếu Node chưa có window); `mediaSourceCtor` chỉ
+      // kiểm tra `typeof window === "undefined"` nên cách này phục hồi đúng trạng thái.
+      if (hadWindow) (globalThis as { window?: unknown }).window = original;
+      else Reflect.deleteProperty(globalThis, "window");
+    }
+  };
+
+  it("trả false khi không có window (môi trường Node)", () => {
+    // Test chạy trong Node nên không có MediaSource; đây cũng là hành vi mong muốn
+    // khi render phía server.
+    assert.equal(mseMp3Supported(), false);
+  });
+
+  it("trả true khi trình duyệt báo hỗ trợ audio/mpeg", () => {
+    withMediaSource(
+      () => true,
+      () => assert.equal(mseMp3Supported(), true),
+    );
+  });
+
+  it("trả false khi trình duyệt không hỗ trợ audio/mpeg (ví dụ Firefox)", () => {
+    withMediaSource(
+      () => false,
+      () => assert.equal(mseMp3Supported(), false),
+    );
+  });
+
+  it("trả false khi isTypeSupported ném lỗi thay vì làm sập", () => {
+    withMediaSource(
+      () => {
+        throw new Error("boom");
+      },
+      () => assert.equal(mseMp3Supported(), false),
+    );
   });
 });

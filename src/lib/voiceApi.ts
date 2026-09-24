@@ -95,6 +95,28 @@ export async function synthesizeSpeech(text: string, voiceLabel: string, signal?
   return response.blob();
 }
 
+/**
+ * Mở luồng audio MP3 từ `/api/tts/stream` để phát dần.
+ *
+ * Trả `Response` để lớp phát tự đọc dần; kiểm tra mã lỗi xong mới trả, nên lỗi 401/429
+ * vẫn thành thông báo tiếng Việt như đường thường.
+ */
+export async function openSpeechStream(text: string, voiceLabel: string, signal?: AbortSignal): Promise<Response> {
+  const form = new FormData();
+  form.append("text", text);
+  form.append("voice", voiceLabel);
+  const response = await fetch(`${voiceApiBase()}/api/tts/stream`, {
+    method: "POST",
+    body: form,
+    headers: authHeaders(),
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(voiceApiErrorMessage(response.status, "TTS"));
+  }
+  return response;
+}
+
 /** Nhận diện giọng nói từ dữ liệu ghi âm qua backend. */
 export async function transcribeSpeech(audio: Blob, signal?: AbortSignal): Promise<string> {
   const form = new FormData();

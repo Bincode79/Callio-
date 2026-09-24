@@ -267,18 +267,23 @@ Hai điểm phải nhớ khi sửa phần này:
   trước; nếu vẫn vượt (mọi bucket đang bị tiêu) thì xoá LRU — đánh đổi có ghi rõ trong
   docstring, không phải bug.
 
-**Streaming:** `/api/tts/stream` phát dần từng đoạn audio (edge-tts hỗ trợ sẵn). Đo
-thực tế với edge-tts: byte đầu tới sau ~0,16s so với ~0,42s khi đợi cả tệp. Giao diện
-hiện **chưa** dùng đường này vì `fetch` vẫn gom hết vào Blob trước khi phát — muốn ăn
-lợi thế thật thì cần phát qua `MediaSource`, mà **chưa kiểm chứng được** MSE có nhận
-MP3 của edge-tts trên trình duyệt thật (MSE phần lớn yêu cầu fMP4/WebM). Không nối vào
-UI khi chưa đo được là cố ý.
+**Streaming (đã kiểm chứng và nối vào UI):** `/api/tts/stream` phát dần từng đoạn audio.
+Đo với edge-tts: byte đầu tới sau ~0,16s so với ~0,42s khi đợi cả tệp. Ban đầu tôi ghi
+là "chưa kiểm chứng" vì nghi `MediaSource` không nhận MP3; sau đó dựng trang
+`public/media-check.html` để hỏi chính trình duyệt và **đã xác nhận**: Chrome báo
+`isTypeSupported("audio/mpeg")` = true và `SourceBuffer` nhận đủ ~4,2 giây audio (lỗi
+`NotAllowedError` ban đầu chỉ là chính sách autoplay vì trang test không có cú click).
+
+- `mseMp3Supported()` quyết định có phát dần được không; `playMp3Stream()` nối từng khối
+  vào `SourceBuffer` ngay khi mạng trả về, phát sau khối đầu tiên.
+- Không hỗ trợ (thường là Firefox: MSE chỉ nhận fMP4/WebM) thì tự lùi về tải cả tệp.
+- Giữ lại `public/media-check.html` làm công cụ kiểm tra lại khi trình duyệt đổi hành vi.
 
 **Đệm audio:** `src/lib/voiceCache.ts` là LRU 32 mục ở phạm vi module, khoá theo
 `giọng + nội dung`. Bấm "Nghe thử" lại, hoặc chạy lại mô phỏng cùng khách hàng, phát
 ngay mà không gọi mạng (đo thực tế: bỏ được ~565ms vòng gọi mạng mỗi lần trúng đệm).
-Khi đọc cả kịch bản, `speakSegments` còn **tải trước đoạn kế tiếp** trong lúc đoạn hiện
-tại đang phát; tải trước lỗi thì bỏ qua, đoạn đó sẽ được gọi lại khi tới lượt.
+Khi đọc cả kịch bản, `speakSegments` còn **tải trước đoạn kế tiếp** (qua đường tải cả
+tệp) trong lúc đoạn hiện tại đang phát; tải trước lỗi thì bỏ qua.
 
 ## Quy ước
 

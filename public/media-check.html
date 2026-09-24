@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <title>Kiểm tra MediaSource với audio backend</title>
+    <style>
+      body { font: 15px/1.6 system-ui, sans-serif; margin: 24px; max-width: 720px; }
+      #result { padding: 12px; border-radius: 8px; background: #f1f5f8; white-space: pre-wrap; }
+      .ok { background: #e7f7ec !important; }
+      .bad { background: #fdeaee !important; }
+    </style>
+  </head>
+  <body>
+    <h1>Kiểm tra MediaSource với MP3 của /api/tts/stream</h1>
+    <p>
+      Trang này chạy trong trình duyệt thật. Nó hỏi trình duyệt xem có hỗ trợ
+      <code>audio/mpeg</code> qua MediaSource hay không, rồi thử phát thật một đoạn audio
+      lấy từ backend.
+    </p>
+    <div id="result">Đang chạy…</div>
+    <script type="module" src="/media-check.js"></script>
+  </body>
+</html>
