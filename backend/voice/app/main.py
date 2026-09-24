@@ -9,7 +9,7 @@ import hmac
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 from .config import Settings, get_settings
 from .engines import Engines, build_engines
@@ -75,6 +75,28 @@ def create_app(settings: Settings | None = None, engines: Engines | None = None)
         except Exception as exc:  # noqa: BLE001 - trả lỗi có kiểm soát cho client
             raise HTTPException(status_code=502, detail=f"Không tổng hợp được giọng đọc: {exc}") from exc
         return Response(content=audio, media_type="audio/mpeg")
+
+    @app.post("/api/tts/stream")
+    async def tts_stream(text: str = Form(...), voice: str | None = Form(None), _: None = Depends(require_token)) -> StreamingResponse:
+        """Như /api/tts nhưng phát dần từng đoạn audio, giảm thời gian chờ nghe.
+
+        Lỗi xảy ra *sau* khi đã gửi header không thể đổi thành mã HTTP lỗi nữa, nên
+        chỉ kiểm tra tham số trước khi stream; lỗi giữa chừng sẽ cắt luồng.
+        """
+        clean = text.strip()
+        if clean == "":
+            raise HTTPException(status_code=400, detail="Văn bản đọc đang trống")
+        if len(clean) > MAX_TTS_CHARS:
+            raise HTTPException(status_code=400, detail=f"Văn bản quá dài (tối đa {MAX_TTS_CHARS} ký tự)")
+
+        async def body():
+            try:
+                async for chunk in engines.tts.stream(clean, resolve_voice(voice, settings.voice)):
+                    yield chunk
+            except Exception:  # noqa: BLE001 - cắt luồng nếu nhà cung cấp lỗi giữa chừng
+                return
+
+        return StreamingResponse(body(), media_type="audio/mpeg")
 
     @app.post("/api/stt")
     async def stt(

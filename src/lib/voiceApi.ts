@@ -12,6 +12,42 @@ export function voiceApiBase(): string {
   return typeof configured === "string" && configured.trim() !== "" ? configured.trim().replace(/\/$/, "") : "";
 }
 
+/** Khoá localStorage cho token do người dùng đặt trong giao diện. */
+export const VOICE_TOKEN_STORAGE_KEY = "callio.voiceToken";
+
+/**
+ * Token gửi kèm request, theo thứ tự ưu tiên: giá trị người dùng đặt trong giao diện
+ * (localStorage) rồi tới biến môi trường `VITE_VOICE_TOKEN`. Trả chuỗi rỗng nghĩa là
+ * backend để mở.
+ */
+export function voiceApiToken(): string {
+  try {
+    const stored = typeof localStorage !== "undefined" ? localStorage.getItem(VOICE_TOKEN_STORAGE_KEY) : null;
+    if (stored && stored.trim() !== "") return stored.trim();
+  } catch {
+    // localStorage có thể bị chặn (chế độ riêng tư); bỏ qua và dùng biến môi trường.
+  }
+  const fromEnv = import.meta.env?.VITE_VOICE_TOKEN;
+  return typeof fromEnv === "string" ? fromEnv.trim() : "";
+}
+
+/** Header xác thực, rỗng khi không có token. Hàm thuần để test được. */
+export function authHeaders(token = voiceApiToken()): Record<string, string> {
+  const clean = token.trim();
+  return clean ? { Authorization: `Bearer ${clean}` } : {};
+}
+
+/** Lưu token người dùng nhập vào giao diện; truyền chuỗi rỗng để xoá. */
+export function setVoiceApiToken(token: string): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    if (token.trim() === "") localStorage.removeItem(VOICE_TOKEN_STORAGE_KEY);
+    else localStorage.setItem(VOICE_TOKEN_STORAGE_KEY, token.trim());
+  } catch {
+    // Không lưu được thì thôi; request vẫn dùng token trong phiên qua biến môi trường.
+  }
+}
+
 /**
  * Kiểm tra backend có sống không. Dùng `health` vì nó nhẹ và không kích hoạt việc
  * nạp model.
@@ -36,9 +72,14 @@ export async function synthesizeSpeech(text: string, voiceLabel: string, signal?
   const form = new FormData();
   form.append("text", text);
   form.append("voice", voiceLabel);
-  const response = await fetch(`${voiceApiBase()}/api/tts`, { method: "POST", body: form, signal });
+  const response = await fetch(`${voiceApiBase()}/api/tts`, {
+    method: "POST",
+    body: form,
+    headers: authHeaders(),
+    signal,
+  });
   if (!response.ok) {
-    throw new Error(`TTS thất bại (${response.status})`);
+    throw new Error(response.status === 401 ? "Máy chủ giọng đọc yêu cầu token" : `TTS thất bại (${response.status})`);
   }
   return response.blob();
 }
@@ -48,9 +89,9 @@ export async function transcribeSpeech(audio: Blob, signal?: AbortSignal): Promi
   const form = new FormData();
   // Tên tệp cần đuôi để server biết định dạng; MediaRecorder thường trả webm/ogg.
   form.append("audio", audio, "recording.webm");
-  const response = await fetch(`${voiceApiBase()}/api/stt`, { method: "POST", body: form, signal });
+  const response = await fetch(`${voiceApiBase()}/api/stt`, { method: "POST", body: form, headers: authHeaders(), signal });
   if (!response.ok) {
-    throw new Error(`STT thất bại (${response.status})`);
+    throw new Error(response.status === 401 ? "Máy chủ giọng đọc yêu cầu token" : `STT thất bại (${response.status})`);
   }
   const body = (await response.json()) as { text?: unknown };
   return typeof body.text === "string" ? body.text : "";

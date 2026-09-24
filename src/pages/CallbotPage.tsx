@@ -45,7 +45,7 @@ import {
 } from "../components/icons";
 import type { CallbotCampaign, CallbotResult, CallbotScriptStep } from "../lib/types";
 import { buildSpeechSegments, parseVoiceLabel, pickVoice, useSpeech, useSpeechRecognition } from "../lib/speech";
-import { voiceSourceLabel } from "../lib/voiceApi";
+import { voiceSourceLabel, voiceApiToken, setVoiceApiToken } from "../lib/voiceApi";
 import { classifyCustomerReply, type ReplyIntent } from "../lib/callbot";
 
 const VOICE_BARS = Array.from({ length: 26 }, (_, seed) => ({ id: `voice-${seed}`, seed }));
@@ -78,6 +78,7 @@ export function CallbotPage() {
   const [resultQuery, setResultQuery] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
+  const [voiceTokenDraft, setVoiceTokenDraft] = useState(() => voiceApiToken());
   const [playing, setPlaying] = useState(false);
   const [stepIndex, setStepIndex] = useState(0);
   const [editingStep, setEditingStep] = useState<CallbotScriptStep | undefined>();
@@ -1167,6 +1168,33 @@ export function CallbotPage() {
             Máy chủ giọng đọc chưa chạy và trình duyệt này không hỗ trợ đọc tiếng nói, nên không nghe thử được. Vẫn có thể chọn giọng để lưu vào chiến dịch.
           </p>
         ) : null}
+
+        <div className="mb-4 rounded-2xl border border-[#edf1f5] p-4">
+          <p className="text-[12.5px] font-black text-[#111a22]">Token máy chủ giọng đọc</p>
+          <p className="mt-1 text-[11.5px] leading-5 text-[#8492a0]">
+            Chỉ cần điền nếu máy chủ đặt <code className="font-mono">CALLIO_AUTH_TOKEN</code>. Token được lưu trong trình duyệt này.
+          </p>
+          <div className="mt-2 flex gap-2">
+            <input
+              type="password"
+              className="min-w-0 flex-1 rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13px] outline-none focus:border-[#0f8b98]"
+              placeholder="Để trống nếu máy chủ không yêu cầu"
+              value={voiceTokenDraft}
+              onChange={(event) => setVoiceTokenDraft(event.target.value)}
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setVoiceApiToken(voiceTokenDraft);
+                dispatch({ type: "toast", message: voiceTokenDraft.trim() ? "Đã lưu token máy chủ giọng đọc" : "Đã xoá token máy chủ giọng đọc", tone: "success" });
+              }}
+            >
+              Lưu token
+            </Button>
+          </div>
+        </div>
+
         <ul className="space-y-2.5">
           {VOICES.map((voice) => {
             const active = campaign.voice === voice;

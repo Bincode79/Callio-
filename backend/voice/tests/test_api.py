@@ -19,13 +19,20 @@ from app.voices import VOICE_FEMALE, VOICE_MALE, resolve_voice
 class FakeTts:
     """Trả dữ liệu cố định và ghi lại tham số nhận được để khẳng định."""
 
-    def __init__(self, payload: bytes = b"MP3DATA") -> None:
+    def __init__(self, payload: bytes = b"MP3DATA", chunks: list[bytes] | None = None) -> None:
         self.payload = payload
+        # Mặc định phát hai đoạn để kiểm tra gộp/streaming liền mạch.
+        self.chunks = chunks if chunks is not None else [b"PART1", b"PART2"]
         self.calls: list[tuple[str, str]] = []
 
     async def synthesize(self, text: str, voice: str) -> bytes:
         self.calls.append((text, voice))
         return self.payload
+
+    async def stream(self, text: str, voice: str):
+        self.calls.append((text, voice))
+        for chunk in self.chunks:
+            yield chunk
 
 
 class FakeStt:
@@ -283,6 +290,51 @@ class AuthTests(unittest.TestCase):
         self.assertTrue(body["authRequired"])
         self.assertEqual(body["ttsProvider"], "openai")
         self.assertEqual(body["sttProvider"], "openai")
+
+
+class TtsStreamTests(unittest.TestCase):
+    def test_streams_chunks_in_order(self):
+        tts = FakeTts(chunks=[b"AA", b"BB", b"CC"])
+        client, _ = build_client(tts=tts)
+        response = client.post("/api/tts/stream", data={"text": "Xin chào"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "audio/mpeg")
+        self.assertEqual(response.content, b"AABBCC", "các đoạn phải nối đúng thứ tự")
+
+    def test_stream_resolves_voice_like_tts(self):
+        tts = FakeTts()
+        client, _ = build_client(tts=tts)
+        client.post("/api/tts/stream", data={"text": "Xin chào", "voice": "Giọng nam miền Nam - Minh Khang"})
+        self.assertEqual(tts.calls, [("Xin chào", VOICE_MALE)])
+
+    def test_stream_rejects_empty_text(self):
+        tts = FakeTts()
+        client, _ = build_client(tts=tts)
+        response = client.post("/api/tts/stream", data={"text": "  "})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(tts.calls, [], "không được gọi engine khi văn bản trống")
+
+    def test_stream_rejects_over_limit(self):
+        tts = FakeTts()
+        client, _ = build_client(tts=tts)
+        response = client.post("/api/tts/stream", data={"text": "a" * (MAX_TTS_CHARS + 1)})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(tts.calls, [])
+
+    def test_stream_requires_token_when_configured(self):
+        tts = FakeTts()
+        client, _ = build_client(tts=tts, auth_token="s3cret")
+        response = client.post("/api/tts/stream", data={"text": "Xin chào"})
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(tts.calls, [])
+
+    def test_stream_accepts_correct_token(self):
+        tts = FakeTts()
+        client, _ = build_client(tts=tts, auth_token="s3cret")
+        response = client.post("/api/tts/stream", data={"text": "Xin chào"}, headers={"Authorization": "Bearer s3cret"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"PART1PART2")
 
 
 if __name__ == "__main__":

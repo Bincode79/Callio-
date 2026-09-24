@@ -4,8 +4,9 @@ Backend nhỏ, mã nguồn mở, **miễn phí và không cần API key**, cấp
 thật cho ứng dụng Callio:
 
 - `POST /api/tts` — đọc văn bản thành audio MP3 (thư viện `edge-tts`).
+- `POST /api/tts/stream` — như trên nhưng **phát dần từng đoạn**, giảm thời gian chờ nghe.
 - `POST /api/stt` — nhận diện giọng nói tiếng Việt (mô hình `faster-whisper` chạy cục bộ).
-- `GET /api/health` — kiểm tra backend còn sống.
+- `GET /api/health` — kiểm tra backend còn sống, kèm provider và cờ `authRequired`.
 
 Giao diện **không bắt buộc** phải có backend: nếu backend không chạy, ứng dụng tự lùi
 về Web Speech API của trình duyệt.
@@ -63,6 +64,16 @@ Chọn `openai` mà thiếu `BASE_URL` thì server báo lỗi ngay lúc khởi �
 request đầu tiên thất bại khó hiểu.
 
 
+## Xác thực
+
+Đặt `CALLIO_AUTH_TOKEN=<token>` để bắt buộc mọi request `/api/tts`, `/api/tts/stream` và
+`/api/stt` gửi kèm `Authorization: Bearer <token>`. So sánh bằng `hmac.compare_digest`
+để không rò rỉ token qua thời gian phản hồi.
+
+Trên giao diện, mở **Callbot → Đổi giọng → Token máy chủ giọng đọc** và dán token;
+giá trị được lưu trong trình duyệt (`localStorage`) và gửi kèm mọi request. Hoặc đặt
+`VITE_VOICE_TOKEN` khi build.
+
 ## Lưu ý trung thực
 
 - **edge-tts dùng dịch vụ không chính thức của Microsoft.** Miễn phí và không cần key,
@@ -72,7 +83,7 @@ request đầu tiên thất bại khó hiểu.
 - **faster-whisper chạy hoàn toàn cục bộ** (mã nguồn mở, không gọi dịch vụ ngoài). Lần
   chạy đầu tải model; `small` cho chất lượng tiếng Việt tốt hơn `tiny`/`base` rõ rệt
   nhưng chậm hơn trên CPU.
-- Giới hạn hiện tại: chưa có hàng đợi, chưa streaming, chưa giới hạn tần suất. Khi đặt
+- Giới hạn hiện tại: chưa có hàng đợi, chưa giới hạn tần suất. Khi đặt
   `CALLIO_AUTH_TOKEN` thì đã có xác thực bearer token; ngoài ra vẫn nên chạy sau mạng
   nội bộ hoặc sau reverse proxy.
 

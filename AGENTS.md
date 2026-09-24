@@ -244,9 +244,16 @@ không có SLA). Chi tiết và cảnh báo đầy đủ ở `backend/voice/READ
 Kokoro-FastAPI, speaches, PhoWhisper… mà không đụng vào `app/main.py`. Chọn `openai`
 mà thiếu `BASE_URL` thì **báo lỗi ngay lúc khởi động**.
 
-**Xác thực:** đặt `CALLIO_AUTH_TOKEN` thì `/api/tts` và `/api/stt` đòi
-`Authorization: Bearer <token>`; so sánh bằng `hmac.compare_digest` để không rò rỉ
-token qua thời gian phản hồi. Chưa đặt thì để mở (tiện cho dev nội bộ).
+**Xác thực:** đặt `CALLIO_AUTH_TOKEN` thì `/api/tts`, `/api/tts/stream` và `/api/stt`
+đòi `Authorization: Bearer <token>`; so sánh bằng `hmac.compare_digest` để không rò rỉ
+token qua thời gian phản hồi. Giao diện gửi token qua `authHeaders()` trong
+`src/lib/voiceApi.ts`; người dùng dán token ở **Callbot → Đổi giọng** (lưu
+`localStorage`), hoặc đặt `VITE_VOICE_TOKEN`. Chưa đặt thì để mở (tiện cho dev nội bộ).
+
+**Streaming:** `/api/tts/stream` phát dần từng đoạn audio (edge-tts hỗ trợ sẵn). Đo
+thực tế với edge-tts: byte đầu tới sau ~0,16s so với ~0,42s khi đợi cả tệp. Giao diện
+hiện **chưa** dùng đường này vì `fetch` vẫn gom hết vào Blob trước khi phát — muốn ăn
+lợi thế thật thì cần phát qua `MediaSource`/thẻ audio streaming.
 
 ## Quy ước
 

@@ -60,6 +60,10 @@ class OpenAICompatibleTts:
             raise RuntimeError("Nhà cung cấp TTS trả về audio rỗng")
         return data
 
+    async def stream(self, text: str, voice: str):
+        """Nhà cung cấp OpenAI-compatible trả cả tệp một lần, nên phát một đoạn."""
+        yield await self.synthesize(text, voice)
+
 
 class OpenAICompatibleStt:
     """Nhận diện giọng nói qua endpoint OpenAI-compatible."""

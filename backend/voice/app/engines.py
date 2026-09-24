@@ -21,6 +21,10 @@ class TtsEngine(Protocol):
         """Trả dữ liệu audio MP3 cho `text` bằng `voice`."""
         ...
 
+    def stream(self, text: str, voice: str):
+        """Trả async generator phát dần từng đoạn audio, để bắt đầu nghe sớm hơn."""
+        ...
+
 
 class SttEngine(Protocol):
     def transcribe(self, audio: bytes, language: str) -> str:
@@ -43,6 +47,15 @@ class EdgeTtsEngine:
         if not data:
             raise RuntimeError("edge-tts trả về audio rỗng")
         return data
+
+    async def stream(self, text: str, voice: str):
+        """Phát dần từng đoạn audio ngay khi edge-tts tổng hợp xong."""
+        import edge_tts
+
+        communicate = edge_tts.Communicate(text, voice)
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio" and chunk["data"]:
+                yield chunk["data"]
 
 
 class FasterWhisperEngine:
