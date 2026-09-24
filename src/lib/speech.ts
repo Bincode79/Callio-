@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fillVariables } from "./callbot";
 import { probeVoiceApi, synthesizeSpeech, transcribeSpeech } from "./voiceApi";
+import { AudioCache, nextPrefetchIndex, speechCacheKey } from "./voiceCache";
 import type { CallbotCampaign, CallbotScriptStep, Customer } from "./types";
 
 /**
@@ -89,6 +90,12 @@ export function buildSpeechSegments(script: CallbotScriptStep[], customer: Custo
 export function speechSupported(): boolean {
   return typeof window !== "undefined" && "speechSynthesis" in window && typeof SpeechSynthesisUtterance !== "undefined";
 }
+
+/**
+ * Đệm audio dùng chung cho mọi lần gọi `useSpeech` trong phiên. Đặt ở phạm vi module
+ * để sống qua các lần render/điều hướng, thay vì mất khi component unmount.
+ */
+const audioCache = new AudioCache(32);
 
 interface UseSpeechValue {
   supported: boolean;
@@ -222,7 +229,11 @@ export function useSpeech(voiceLabel?: string): UseSpeechValue {
   const speakViaBackend = useCallback(
     async (text: string, id: string): Promise<boolean> => {
       try {
-        const blob = await synthesizeSpeech(text, voiceLabel ?? "");
+        // Câu đã tổng hợp trước đó (bấm lại, chạy lại mô phỏng) phát ngay, không gọi mạng.
+        const key = speechCacheKey(text, voiceLabel ?? "");
+        const cached = audioCache.get(key);
+        const blob = cached ?? (await synthesizeSpeech(text, voiceLabel ?? ""));
+        if (!cached) audioCache.set(key, blob);
         // Người dùng có thể đã bấm dừng trong lúc chờ mạng; đừng phát nữa.
         if (cancelledRef.current) return true;
         const url = URL.createObjectURL(blob);
@@ -273,6 +284,25 @@ export function useSpeech(voiceLabel?: string): UseSpeechValue {
           for (let index = 0; index < segments.length; index += 1) {
             if (cancelledRef.current) return;
             onSegment?.(index);
+
+            // Tải trước đoạn kế tiếp trong lúc đoạn hiện tại đang phát, để đoạn sau
+            // bắt đầu gần như tức thì thay vì chờ một vòng mạng.
+            const prefetch = nextPrefetchIndex(segments, index, (id) => {
+              const seg = segments.find((item) => item.id === id);
+              return seg ? audioCache.has(speechCacheKey(seg.text, voiceLabel ?? "")) : false;
+            });
+            if (prefetch !== null) {
+              const nextSegment = segments[prefetch];
+              const nextKey = speechCacheKey(nextSegment.text, voiceLabel ?? "");
+              if (!audioCache.has(nextKey)) {
+                void synthesizeSpeech(nextSegment.text, voiceLabel ?? "")
+                  .then((blob) => audioCache.set(nextKey, blob))
+                  .catch(() => {
+                    // Tải trước thất bại không sao: đoạn đó sẽ được gọi lại khi tới lượt.
+                  });
+              }
+            }
+
             const ok = await speakViaBackend(segments[index].text, `${batchId}-${index}`);
             if (!ok) {
               // Backend hỏng giữa chừng: đọc nốt phần còn lại bằng trình duyệt.
@@ -291,7 +321,7 @@ export function useSpeech(voiceLabel?: string): UseSpeechValue {
       if (!supported) return false;
       return speakSegmentsViaBrowser(segments, profile, batchId, onSegment);
     },
-    [backend, supported, speakViaBackend, speakViaBrowser, speakSegmentsViaBrowser],
+    [backend, supported, speakViaBackend, speakViaBrowser, speakSegmentsViaBrowser, voiceLabel],
   );
 
   return { supported, backend, voices, speakingId, speak, speakSegments, stop };

@@ -20,6 +20,7 @@ const testFiles = [
   resolve(root, "src/lib/store.test.tsx"),
   resolve(root, "src/lib/speech.test.ts"),
   resolve(root, "src/lib/voiceApi.test.ts"),
+  resolve(root, "src/lib/voiceCache.test.ts"),
 ];
 
 const outDir = mkdtempSync(join(tmpdir(), "callio-test-"));
