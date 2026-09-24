@@ -146,3 +146,17 @@ def build_engines(settings: "Settings") -> Engines:
         stt = FasterWhisperEngine(settings.whisper_model, settings.whisper_device, settings.whisper_compute_type)
 
     return Engines(tts=tts, stt=stt)
+
+
+def wrap_tts_cache(tts: TtsEngine, settings: "Settings") -> tuple[TtsEngine, "TtsCache"]:
+    """Bọc engine TTS bằng đệm; trả cả engine và đệm để `/api/health` báo số liệu.
+
+    Tắt bằng `CALLIO_TTS_CACHE_ENTRIES=0`; khi tắt vẫn dùng đệm rỗng (mọi `get` trả
+    None) nên không cần nhánh code riêng ở nơi gọi.
+    """
+    from .ttscache import CachedTtsEngine, TtsCache
+
+    cache = TtsCache(settings.tts_cache_entries, settings.tts_cache_bytes)
+    if not cache.enabled:
+        return tts, cache
+    return CachedTtsEngine(tts, cache), cache

@@ -45,6 +45,27 @@ nên chỉ cần chạy `npm run dev` song song là giao diện tự nhận back
 | `CALLIO_RATE_LIMIT_WINDOW` | `60` | Độ dài cửa sổ giới hạn, tính bằng giây. |
 | `CALLIO_RATE_LIMIT_MAX_KEYS` | `10000` | Trần số bucket giữ trong bộ nhớ (chống rò rỉ khi nhiều IP). |
 | `CALLIO_TRUSTED_PROXIES` | (trống) | IP proxy được tin để đọc `X-Forwarded-For`, cách nhau dấu phẩy. |
+| `CALLIO_TTS_CACHE_ENTRIES` | `256` | Số câu audio đệm ở máy chủ (0 = tắt). |
+| `CALLIO_TTS_CACHE_BYTES` | `67108864` | Tổng dung lượng đệm tối đa (64 MB). |
+
+## Đệm audio ở máy chủ
+
+`app/ttscache.py` đệm kết quả tổng hợp theo `giọng + nội dung`, LRU theo số mục và tổng
+dung lượng. Vì sao cần dù client đã có đệm:
+
+- Nhiều người dùng gọi cùng câu (lời thoại mẫu, câu xác nhận) — đệm máy chủ phục vụ
+  được mọi người, không chỉ một trình duyệt.
+- `edge-tts` là dịch vụ **không chính thức**; gọi lại cùng một câu vừa tốn vừa tăng nguy
+  cơ bị chặn.
+- Client tải lại trang hoặc đổi máy thì mất đệm của nó; đệm máy chủ thì không.
+
+**Đo thực tế** (edge-tts thật): gọi cùng một câu 3 lần — lần đầu 1,55s (tổng hợp thật),
+hai lần sau ~1,5ms (trúng đệm), tức nhanh hơn ~900×, và edge-tts chỉ được gọi một lần.
+Đường `/api/tts/stream` cũng dùng đệm: câu đã có thì trả ngay. `/api/health` báo
+`ttsCache` (số mục, byte, hits, misses, hitRate).
+
+Tắt bằng `CALLIO_TTS_CACHE_ENTRIES=0`.
+
 
 ## Giới hạn tần suất
 

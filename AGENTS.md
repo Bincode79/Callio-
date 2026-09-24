@@ -285,6 +285,12 @@ ngay mà không gọi mạng (đo thực tế: bỏ được ~565ms vòng gọi 
 Khi đọc cả kịch bản, `speakSegments` còn **tải trước đoạn kế tiếp** (qua đường tải cả
 tệp) trong lúc đoạn hiện tại đang phát; tải trước lỗi thì bỏ qua.
 
+Máy chủ cũng có đệm riêng (`backend/voice/app/ttscache.py`, LRU theo `giọng + nội dung`,
+mặc định 256 mục / 64 MB): phục vụ được **nhiều người dùng** cùng câu và giảm số lần gọi
+dịch vụ edge-tts không chính thức. Đo thực tế: lần đầu 1,55s, các lần sau ~1,5ms (~900×).
+`/api/health` báo `ttsCache`. Hai tầng đệm là cố ý: tầng client tránh cả vòng mạng, tầng
+máy chủ tránh gọi lại upstream cho người dùng khác.
+
 ## Quy ước
 
 - Toàn bộ nội dung hiển thị cho người dùng là tiếng Việt. Slug route dùng dạng

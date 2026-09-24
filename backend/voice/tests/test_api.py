@@ -5,17 +5,19 @@ Engine được tiêm bản giả nên test không cần mạng, không cần mo
 
 from __future__ import annotations
 
+import asyncio
 import unittest
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from app.config import Settings
-from app.engines import Engines, build_engines
+from app.engines import Engines, build_engines, wrap_tts_cache
 from app.main import MAX_TTS_CHARS, create_app
 from app.providers import OpenAICompatibleStt, OpenAICompatibleTts
 from app.clientid import parse_forwarded_for, resolve_client_ip
 from app.ratelimit import TokenBucketLimiter
+from app.ttscache import CachedTtsEngine, TtsCache, ttsCacheKey
 from app.voices import VOICE_FEMALE, VOICE_MALE, resolve_voice
 
 
@@ -586,6 +588,152 @@ class RunScriptTests(unittest.TestCase):
         # mất, kẻ gửi tự đặt header sẽ né được giới hạn tần suất (đã từng xảy ra thật).
         script = (Path(__file__).resolve().parent.parent / "run.sh").read_text(encoding="utf-8")
         self.assertIn("--no-proxy-headers", script)
+
+
+class TtsCacheTests(unittest.TestCase):
+    def test_stores_and_returns_by_key(self):
+        cache = TtsCache(max_entries=4)
+        cache.set(ttsCacheKey("Xin chào", "A"), b"AUDIO")
+        self.assertEqual(cache.get(ttsCacheKey("Xin chào", "A")), b"AUDIO")
+
+    def test_key_includes_voice(self):
+        self.assertNotEqual(ttsCacheKey("Xin chào", "A"), ttsCacheKey("Xin chào", "B"))
+
+    def test_key_normalises_whitespace(self):
+        self.assertEqual(ttsCacheKey("  Xin chào  ", " A "), ttsCacheKey("Xin chào", "A"))
+
+    def test_evicts_oldest_when_over_entries(self):
+        cache = TtsCache(max_entries=2)
+        cache.set("a", b"1")
+        cache.set("b", b"2")
+        cache.set("c", b"3")
+        self.assertIsNone(cache.get("a"), "mục cũ nhất phải bị loại")
+        self.assertEqual(cache.get("c"), b"3")
+
+    def test_get_touches_entry_so_it_survives(self):
+        cache = TtsCache(max_entries=2)
+        cache.set("a", b"1")
+        cache.set("b", b"2")
+        cache.get("a")
+        cache.set("c", b"3")
+        self.assertEqual(cache.get("a"), b"1", "mục vừa đọc không được bị loại")
+        self.assertIsNone(cache.get("b"), "mục cũ nhất bị loại")
+
+    def test_evicts_when_over_bytes(self):
+        cache = TtsCache(max_entries=10, max_bytes=5)
+        cache.set("a", b"1234")
+        cache.set("b", b"5678")
+        # Tổng vượt 5 byte nên mục cũ bị loại để giữ hạn mức.
+        self.assertIsNone(cache.get("a"))
+        self.assertEqual(cache.get("b"), b"5678")
+        self.assertLessEqual(cache.bytes_used, 5)
+
+    def test_skips_entry_larger_than_total_budget(self):
+        cache = TtsCache(max_entries=10, max_bytes=4)
+        cache.set("big", b"12345")
+        self.assertIsNone(cache.get("big"), "mục lớn hơn hạn mức thì không đệm")
+        self.assertEqual(cache.size, 0)
+
+    def test_disabled_cache_never_stores(self):
+        cache = TtsCache(max_entries=0)
+        self.assertFalse(cache.enabled)
+        cache.set("a", b"1")
+        self.assertIsNone(cache.get("a"))
+
+    def test_tracks_hits_and_misses(self):
+        cache = TtsCache(max_entries=2)
+        cache.get("missing")
+        cache.set("a", b"1")
+        cache.get("a")
+        stats = cache.stats()
+        self.assertEqual(stats["hits"], 1)
+        self.assertEqual(stats["misses"], 1)
+        self.assertEqual(stats["hitRate"], 50)
+        self.assertEqual(stats["entries"], 1)
+
+    def test_hit_rate_is_zero_without_requests(self):
+        self.assertEqual(TtsCache(max_entries=2).stats()["hitRate"], 0)
+
+
+class CachedTtsEngineTests(unittest.TestCase):
+    def test_second_synthesize_uses_cache_not_inner_engine(self):
+        inner = FakeTts(payload=b"AUDIO")
+        cache = TtsCache(max_entries=4)
+        engine = CachedTtsEngine(inner, cache)
+
+        first = asyncio.run(engine.synthesize("Xin chào", VOICE_FEMALE))
+        second = asyncio.run(engine.synthesize("Xin chào", VOICE_FEMALE))
+
+        self.assertEqual(first, b"AUDIO")
+        self.assertEqual(second, b"AUDIO")
+        self.assertEqual(len(inner.calls), 1, "lần thứ hai phải lấy từ đệm, không gọi lại engine")
+
+    def test_different_voice_is_cached_separately(self):
+        inner = FakeTts(payload=b"AUDIO")
+        engine = CachedTtsEngine(inner, TtsCache(max_entries=4))
+        asyncio.run(engine.synthesize("Xin chào", VOICE_FEMALE))
+        asyncio.run(engine.synthesize("Xin chào", VOICE_MALE))
+        self.assertEqual(len(inner.calls), 2, "khác giọng thì phải tổng hợp riêng")
+
+    def test_stream_yields_cached_audio_without_calling_inner(self):
+        inner = FakeTts(chunks=[b"PART1", b"PART2"])
+        engine = CachedTtsEngine(inner, TtsCache(max_entries=4))
+        # Nạp đệm trước.
+        asyncio.run(engine.synthesize("Xin chào", VOICE_FEMALE))
+        inner.calls.clear()
+
+        async def collect():
+            return [chunk async for chunk in engine.stream("Xin chào", VOICE_FEMALE)]
+
+        chunks = asyncio.run(collect())
+        self.assertEqual(chunks, [b"MP3DATA"], "có đệm thì phát ngay một khối")
+        self.assertEqual(inner.calls, [], "không được gọi lại engine")
+
+    def test_stream_falls_through_to_inner_when_not_cached(self):
+        inner = FakeTts(chunks=[b"PART1", b"PART2"])
+        engine = CachedTtsEngine(inner, TtsCache(max_entries=4))
+
+        async def collect():
+            return [chunk async for chunk in engine.stream("Câu mới", VOICE_FEMALE)]
+
+        chunks = asyncio.run(collect())
+        self.assertEqual(chunks, [b"PART1", b"PART2"])
+        self.assertEqual(len(inner.calls), 1)
+
+
+class WrapTtsCacheTests(unittest.TestCase):
+    def test_wraps_engine_when_enabled(self):
+        inner = FakeTts()
+        wrapped, cache = wrap_tts_cache(inner, Settings(tts_cache_entries=4))
+        self.assertIsInstance(wrapped, CachedTtsEngine)
+        self.assertTrue(cache.enabled)
+
+    def test_returns_engine_unchanged_when_disabled(self):
+        inner = FakeTts()
+        wrapped, cache = wrap_tts_cache(inner, Settings(tts_cache_entries=0))
+        self.assertIs(wrapped, inner, "tắt đệm thì trả đúng engine gốc, không bọc thừa")
+        self.assertFalse(cache.enabled)
+
+
+class HealthCacheTests(unittest.TestCase):
+    def test_health_reports_tts_cache_stats(self):
+        settings = Settings(tts_cache_entries=4)
+        engines = Engines(tts=FakeTts(), stt=FakeStt())
+        cache = TtsCache(4)
+        wrapped = CachedTtsEngine(engines.tts, cache)
+        app = create_app(settings=settings, engines=Engines(tts=wrapped, stt=engines.stt), tts_cache=cache)
+        client = TestClient(app)
+
+        client.post("/api/tts", data={"text": "a"})
+        client.post("/api/tts", data={"text": "a"})
+        body = client.get("/api/health").json()
+
+        self.assertEqual(body["ttsCache"]["entries"], 1)
+        self.assertEqual(body["ttsCache"]["hits"], 1)
+
+    def test_health_reports_null_when_cache_injected_as_none(self):
+        client, _ = build_client()
+        self.assertIsNone(client.get("/api/health").json()["ttsCache"])
 
 
 if __name__ == "__main__":

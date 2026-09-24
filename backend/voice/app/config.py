@@ -54,6 +54,9 @@ class Settings:
     # Danh sách IP proxy được tin để đọc X-Forwarded-For (cách nhau dấu phẩy). Để
     # trống nếu chạy trực tiếp; nếu không, header giả có thể dùng để né hạn mức.
     trusted_proxies: frozenset[str] = field(default_factory=frozenset)
+    # Đệm audio tổng hợp ở máy chủ: số mục và tổng dung lượng tối đa (0 = tắt).
+    tts_cache_entries: int = 256
+    tts_cache_bytes: int = 64 * 1024 * 1024
 
 
 def _split_origins(raw: str) -> tuple[str, ...]:
@@ -84,4 +87,6 @@ def get_settings() -> Settings:
         rate_limit_window_seconds=float(os.getenv("CALLIO_RATE_LIMIT_WINDOW", "60")),
         rate_limit_max_keys=int(os.getenv("CALLIO_RATE_LIMIT_MAX_KEYS", "10000")),
         trusted_proxies=frozenset(_split_origins(os.getenv("CALLIO_TRUSTED_PROXIES", ""))),
+        tts_cache_entries=int(os.getenv("CALLIO_TTS_CACHE_ENTRIES", "256")),
+        tts_cache_bytes=int(os.getenv("CALLIO_TTS_CACHE_BYTES", str(64 * 1024 * 1024))),
     )

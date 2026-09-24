@@ -13,8 +13,9 @@ from fastapi.responses import Response, StreamingResponse
 
 from .clientid import resolve_client_ip
 from .config import Settings, get_settings
-from .engines import Engines, build_engines
+from .engines import Engines, build_engines, wrap_tts_cache
 from .ratelimit import TokenBucketLimiter
+from .ttscache import TtsCache
 from .voices import resolve_voice
 
 # Giới hạn độ dài văn bản đọc để một request không kéo dài vô hạn; 2000 ký tự
@@ -30,16 +31,23 @@ def create_app(
     engines: Engines | None = None,
     tts_limiter: TokenBucketLimiter | None = None,
     stt_limiter: TokenBucketLimiter | None = None,
+    tts_cache: "TtsCache | None" = None,
 ) -> FastAPI:
     """Dựng app. Tham số cho phép test tiêm cấu hình, engine giả và bộ giới hạn."""
     settings = settings or get_settings()
+    # Ghi nhớ trước khi gán: engine được tiêm (test) thì không bọc đệm, vì bản giả đã
+    # có hành vi cố định và bọc thêm chỉ làm test khó đọc.
+    injected_engines = engines is not None
     engines = engines or build_engines(settings)
+    if tts_cache is None and not injected_engines:
+        engines.tts, tts_cache = wrap_tts_cache(engines.tts, settings)
     tts_limiter = tts_limiter or TokenBucketLimiter(settings.rate_limit_tts, settings.rate_limit_window_seconds, max_keys=settings.rate_limit_max_keys)
     stt_limiter = stt_limiter or TokenBucketLimiter(settings.rate_limit_stt, settings.rate_limit_window_seconds, max_keys=settings.rate_limit_max_keys)
 
-    app = FastAPI(title="Callio Voice API", version="1.2.0")
+    app = FastAPI(title="Callio Voice API", version="1.3.0")
     app.state.settings = settings
     app.state.engines = engines
+    app.state.tts_cache = tts_cache
     app.state.tts_limiter = tts_limiter
     app.state.stt_limiter = stt_limiter
 
@@ -106,6 +114,7 @@ def create_app(
                 "stt": settings.rate_limit_stt,
                 "windowSeconds": settings.rate_limit_window_seconds,
             },
+            "ttsCache": tts_cache.stats() if tts_cache is not None else None,
         }
 
     @app.post("/api/tts")
