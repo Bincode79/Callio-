@@ -42,7 +42,7 @@ export interface AppState {
   toasts: Array<{ id: number; message: string; tone: "success" | "info" | "warn" }>;
 }
 
-type Action =
+export type Action =
   | { type: "assignConversation"; id: string; assignee: string }
   | { type: "resolveConversation"; id: string }
   | { type: "replyConversation"; id: string; body: string }
@@ -67,7 +67,13 @@ type Action =
   | { type: "toast"; message: string; tone?: "success" | "info" | "warn" }
   | { type: "dismissToast"; id: number };
 
-const initialState: AppState = {
+/**
+ * State khởi tạo, dùng chung cho `AppProvider` và cho test reducer.
+ *
+ * Export để test có thể dựng lại state sạch: bộ test phải chạy được nhiều lần
+ * mà không bị ảnh hưởng lẫn nhau.
+ */
+export const initialState: AppState = {
   customers,
   conversations,
   calls,
@@ -89,7 +95,10 @@ function nextToast(state: AppState, message: string, tone: "success" | "info" | 
   return { ...state, toasts: [...state.toasts.slice(-2), { id, message, tone }] };
 }
 
-function reducer(state: AppState, action: Action): AppState {
+/**
+ * Reducer thuần, export để test gọi trực tiếp mà không cần render React.
+ */
+export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "assignConversation": {
       const conversations = state.conversations.map((item) =>

@@ -26,22 +26,32 @@ Kiểm tra nhanh mà không ghi đè file: `npx tsc --noEmit` và `npx biome lin
 
 Hạ tầng test dùng `node:test` có sẵn trong Node, không thêm runner nào.
 
-- Bộ test nằm cạnh mã nguồn: `src/lib/callbot.test.ts`.
-- `scripts/run-tests.mjs` bundle bộ test bằng **esbuild đã có sẵn trong
+- Bộ test nằm cạnh mã nguồn:
+  - `src/lib/callbot.test.ts` — engine gọi AI.
+  - `src/lib/store.test.tsx` — reducer của store.
+- `scripts/run-tests.mjs` bundle từng bộ test bằng **esbuild đã có sẵn trong
   `node_modules`** (qua Vite) rồi chạy `node --test`. Cần bundle vì `src/lib` import
   theo kiểu bundler (không có đuôi file) và Node ESM không resolve được trực tiếp.
+  Danh sách bộ test được liệt kê tường minh trong script — thêm bộ mới thì thêm vào đó.
 - File test nằm trong `src/` nên được `tsc` và Biome kiểm tra như mã sản phẩm, nhưng
   **không lọt vào bundle** vì chỉ có entry point được Vite đóng gói từ `index.html`.
 - `@types/node` là devDependency duy nhất thêm vào cho việc này, chỉ để có type của
   `node:test`.
 - CI ở `.github/workflows/verify.yml` chạy kiểm tra kiểu, lint, test và build.
 
-Viết test cho engine cần lưu ý hai điểm đã từng gây lỗi:
+Reducer được export (`reducer`, `initialState`, `Action`) để test gọi trực tiếp mà
+không cần render React. `initialState` là hằng dùng chung, nên test phải
+`structuredClone` nó ra trước mỗi ca — nếu không, các ca sẽ ảnh hưởng lẫn nhau.
+
+Viết test cần lưu ý vài điểm đã từng gây lỗi:
 
 - `hasOptedOut` chuẩn hoá **cả** từ khoá lẫn chuỗi đầu vào. Chỉ chuẩn hoá một phía thì
   cụm còn dấu sẽ không bao giờ khớp.
-- `quietHours` mặc định bật, nên test chạy ngoài giờ làm việc sẽ bị chặn hết. Dùng
-  `withRules()` để tắt cờ này cho các ca không kiểm tra khung giờ.
+- `quietHours` mặc định bật, nên test engine chạy ngoài giờ làm việc sẽ bị chặn hết.
+  Dùng `withRules()` để tắt cờ này cho các ca không kiểm tra khung giờ.
+- Không khẳng định dựa vào việc một giá trị mới **tình cờ khác** giá trị sẵn có của
+  đối tượng khác. Ví dụ đổi giọng chiến dịch: phải so với chính giá trị trước đó của
+  chiến dịch kia, vì giọng mới có thể trùng giọng nó đang dùng.
 
 ## Kiến trúc
 

@@ -14,25 +14,32 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
-const testFile = resolve(root, "src/lib/callbot.test.ts");
+// Liệt kê tường minh để không phụ thuộc glob của shell; thêm bộ test mới thì thêm vào đây.
+const testFiles = [resolve(root, "src/lib/callbot.test.ts"), resolve(root, "src/lib/store.test.tsx")];
 
 const outDir = mkdtempSync(join(tmpdir(), "callio-test-"));
-const outFile = join(outDir, "callbot.test.mjs");
+const outFiles = [];
 
 try {
   const esbuild = resolve(root, "node_modules/.bin/esbuild");
-  const build = spawnSync(
-    esbuild,
-    [testFile, "--bundle", "--platform=node", "--format=esm", `--outfile=${outFile}`, "--log-level=warning"],
-    { stdio: "inherit" },
-  );
 
-  if (build.status !== 0) {
-    console.error("Bundle test thất bại");
-    process.exit(build.status ?? 1);
+  for (const [index, testFile] of testFiles.entries()) {
+    const outFile = join(outDir, `suite-${index}.mjs`);
+    const build = spawnSync(
+      esbuild,
+      [testFile, "--bundle", "--platform=node", "--format=esm", `--outfile=${outFile}`, "--log-level=warning"],
+      { stdio: "inherit" },
+    );
+
+    if (build.status !== 0) {
+      console.error(`Bundle thất bại: ${testFile}`);
+      process.exit(build.status ?? 1);
+    }
+
+    outFiles.push(outFile);
   }
 
-  const run = spawnSync(process.execPath, ["--test", outFile], { stdio: "inherit" });
+  const run = spawnSync(process.execPath, ["--test", ...outFiles], { stdio: "inherit" });
   process.exit(run.status ?? 1);
 } finally {
   rmSync(outDir, { recursive: true, force: true });
