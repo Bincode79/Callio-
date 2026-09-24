@@ -238,6 +238,16 @@ giống nhau trên mọi thiết bị. Backend là FastAPI nhỏ, **miễn phí,
 Lưu ý: `edge-tts` dùng dịch vụ **không chính thức** của Microsoft (miễn phí nhưng
 không có SLA). Chi tiết và cảnh báo đầy đủ ở `backend/voice/README.md`.
 
+**Đổi engine không cần sửa mã:** backend nói giao thức OpenAI-compatible, chọn bằng
+`CALLIO_TTS_PROVIDER`/`CALLIO_STT_PROVIDER` = `local` hoặc `openai` (+ `_BASE_URL`,
+`_MODEL`, `_VOICE`, `CALLIO_PROVIDER_API_KEY`). Nhờ vậy cắm được VieNeu-TTS,
+Kokoro-FastAPI, speaches, PhoWhisper… mà không đụng vào `app/main.py`. Chọn `openai`
+mà thiếu `BASE_URL` thì **báo lỗi ngay lúc khởi động**.
+
+**Xác thực:** đặt `CALLIO_AUTH_TOKEN` thì `/api/tts` và `/api/stt` đòi
+`Authorization: Bearer <token>`; so sánh bằng `hmac.compare_digest` để không rò rỉ
+token qua thời gian phản hồi. Chưa đặt thì để mở (tiện cho dev nội bộ).
+
 ## Quy ước
 
 - Toàn bộ nội dung hiển thị cho người dùng là tiếng Việt. Slug route dùng dạng

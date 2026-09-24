@@ -10,7 +10,10 @@ app vẫn khởi động và test vẫn chạy được khi máy chưa cài mode
 from __future__ import annotations
 
 import io
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .config import Settings
 
 
 class TtsEngine(Protocol):
@@ -87,3 +90,46 @@ class Engines:
     def __init__(self, tts: TtsEngine, stt: SttEngine) -> None:
         self.tts = tts
         self.stt = stt
+
+
+def build_engines(settings: "Settings") -> Engines:
+    """Dựng engine theo cấu hình.
+
+    `tts_provider`/`stt_provider` là "local" (mặc định) hoặc "openai" (endpoint
+    OpenAI-compatible). Chọn "openai" mà thiếu `base_url` thì báo lỗi ngay lúc khởi
+    động thay vì để request đầu tiên thất bại khó hiểu.
+    """
+    if settings.tts_provider not in {"local", "openai"}:
+        raise ValueError(f"CALLIO_TTS_PROVIDER không hợp lệ: {settings.tts_provider}")
+    if settings.stt_provider not in {"local", "openai"}:
+        raise ValueError(f"CALLIO_STT_PROVIDER không hợp lệ: {settings.stt_provider}")
+
+    if settings.tts_provider == "openai":
+        if not settings.tts_base_url:
+            raise ValueError("CALLIO_TTS_PROVIDER=openai cần CALLIO_TTS_BASE_URL")
+        # Import muộn để không kéo phụ thuộc khi chỉ dùng đường cục bộ.
+        from .providers import OpenAICompatibleTts
+
+        tts: TtsEngine = OpenAICompatibleTts(
+            base_url=settings.tts_base_url,
+            model=settings.tts_model,
+            api_key=settings.provider_api_key,
+            voice_override=settings.tts_voice or None,
+        )
+    else:
+        tts = EdgeTtsEngine()
+
+    if settings.stt_provider == "openai":
+        if not settings.stt_base_url:
+            raise ValueError("CALLIO_STT_PROVIDER=openai cần CALLIO_STT_BASE_URL")
+        from .providers import OpenAICompatibleStt
+
+        stt: SttEngine = OpenAICompatibleStt(
+            base_url=settings.stt_base_url,
+            model=settings.stt_model,
+            api_key=settings.provider_api_key,
+        )
+    else:
+        stt = FasterWhisperEngine(settings.whisper_model, settings.whisper_device, settings.whisper_compute_type)
+
+    return Engines(tts=tts, stt=stt)

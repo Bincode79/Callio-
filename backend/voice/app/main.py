@@ -5,12 +5,14 @@ Chạy: `uvicorn app.main:app --port 8000` trong thư mục `backend/voice`.
 
 from __future__ import annotations
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+import hmac
+
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
 from .config import Settings, get_settings
-from .engines import EdgeTtsEngine, Engines, FasterWhisperEngine
+from .engines import Engines, build_engines
 from .voices import resolve_voice
 
 # Giới hạn độ dài văn bản đọc để một request không kéo dài vô hạn; 2000 ký tự
@@ -24,12 +26,9 @@ STT_LANGUAGE = "vi"
 def create_app(settings: Settings | None = None, engines: Engines | None = None) -> FastAPI:
     """Dựng app. Tham số cho phép test tiêm cấu hình và engine giả."""
     settings = settings or get_settings()
-    engines = engines or Engines(
-        tts=EdgeTtsEngine(),
-        stt=FasterWhisperEngine(settings.whisper_model, settings.whisper_device, settings.whisper_compute_type),
-    )
+    engines = engines or build_engines(settings)
 
-    app = FastAPI(title="Callio Voice API", version="1.0.0")
+    app = FastAPI(title="Callio Voice API", version="1.1.0")
     app.state.settings = settings
     app.state.engines = engines
 
@@ -41,16 +40,31 @@ def create_app(settings: Settings | None = None, engines: Engines | None = None)
             allow_headers=["*"],
         )
 
+    def require_token(authorization: str | None = Header(default=None)) -> None:
+        """Kiểm tra bearer token nếu `CALLIO_AUTH_TOKEN` được đặt.
+
+        So sánh bằng `hmac.compare_digest` để tránh rò rỉ thời gian; so khớp chuỗi
+        thường (`==`) có thể lộ dần token qua thời gian phản hồi.
+        """
+        if not settings.auth_token:
+            return
+        expected = f"Bearer {settings.auth_token}"
+        if authorization is None or not hmac.compare_digest(authorization, expected):
+            raise HTTPException(status_code=401, detail="Thiếu hoặc sai token xác thực")
+
     @app.get("/api/health")
     async def health() -> dict[str, object]:
         return {
             "ok": True,
             "voice": settings.voice,
             "whisperModel": settings.whisper_model,
+            "ttsProvider": settings.tts_provider,
+            "sttProvider": settings.stt_provider,
+            "authRequired": bool(settings.auth_token),
         }
 
     @app.post("/api/tts")
-    async def tts(text: str = Form(...), voice: str | None = Form(None)) -> Response:
+    async def tts(text: str = Form(...), voice: str | None = Form(None), _: None = Depends(require_token)) -> Response:
         clean = text.strip()
         if clean == "":
             raise HTTPException(status_code=400, detail="Văn bản đọc đang trống")
@@ -63,7 +77,11 @@ def create_app(settings: Settings | None = None, engines: Engines | None = None)
         return Response(content=audio, media_type="audio/mpeg")
 
     @app.post("/api/stt")
-    async def stt(audio: UploadFile = File(...), language: str = Form(STT_LANGUAGE)) -> dict[str, str]:
+    async def stt(
+        audio: UploadFile = File(...),
+        language: str = Form(STT_LANGUAGE),
+        _: None = Depends(require_token),
+    ) -> dict[str, str]:
         data = await audio.read()
         if not data:
             raise HTTPException(status_code=400, detail="Tệp audio rỗng")

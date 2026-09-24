@@ -27,11 +27,23 @@ DEFAULT_ALLOWED_ORIGINS: tuple[str, ...] = ()
 @dataclass(frozen=True)
 class Settings:
     voice: str = DEFAULT_VOICE
+    max_audio_bytes: int = MAX_AUDIO_BYTES
+    allowed_origins: tuple[str, ...] = field(default_factory=lambda: DEFAULT_ALLOWED_ORIGINS)
+    # "local" dùng edge-tts + faster-whisper; "openai" gọi endpoint OpenAI-compatible
+    # (VieNeu-TTS, Kokoro-FastAPI, speaches, PhoWhisper…).
+    tts_provider: str = "local"
+    stt_provider: str = "local"
     whisper_model: str = DEFAULT_WHISPER_MODEL
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
-    max_audio_bytes: int = MAX_AUDIO_BYTES
-    allowed_origins: tuple[str, ...] = field(default_factory=lambda: DEFAULT_ALLOWED_ORIGINS)
+    tts_base_url: str = ""
+    tts_model: str = "tts-1"
+    tts_voice: str = ""
+    stt_base_url: str = ""
+    stt_model: str = "whisper-1"
+    provider_api_key: str = ""
+    # Nếu đặt, mọi request /api/tts và /api/stt phải kèm `Authorization: Bearer <token>`.
+    auth_token: str = ""
 
 
 def _split_origins(raw: str) -> tuple[str, ...]:
@@ -48,4 +60,13 @@ def get_settings() -> Settings:
         whisper_compute_type=os.getenv("CALLIO_WHISPER_COMPUTE_TYPE", "int8"),
         max_audio_bytes=int(os.getenv("CALLIO_MAX_AUDIO_BYTES", str(MAX_AUDIO_BYTES))),
         allowed_origins=_split_origins(os.getenv("CALLIO_ALLOWED_ORIGINS", "")),
+        tts_provider=os.getenv("CALLIO_TTS_PROVIDER", "local"),
+        stt_provider=os.getenv("CALLIO_STT_PROVIDER", "local"),
+        tts_base_url=os.getenv("CALLIO_TTS_BASE_URL", ""),
+        tts_model=os.getenv("CALLIO_TTS_MODEL", "tts-1"),
+        tts_voice=os.getenv("CALLIO_TTS_VOICE", ""),
+        stt_base_url=os.getenv("CALLIO_STT_BASE_URL", ""),
+        stt_model=os.getenv("CALLIO_STT_MODEL", "whisper-1"),
+        provider_api_key=os.getenv("CALLIO_PROVIDER_API_KEY", ""),
+        auth_token=os.getenv("CALLIO_AUTH_TOKEN", ""),
     )
