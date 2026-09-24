@@ -45,6 +45,7 @@ import {
 } from "../components/icons";
 import type { CallbotCampaign, CallbotResult, CallbotScriptStep } from "../lib/types";
 import { buildSpeechSegments, parseVoiceLabel, pickVoice, useSpeech, useSpeechRecognition } from "../lib/speech";
+import { voiceSourceLabel } from "../lib/voiceApi";
 import { classifyCustomerReply, type ReplyIntent } from "../lib/callbot";
 
 const VOICE_BARS = Array.from({ length: 26 }, (_, seed) => ({ id: `voice-${seed}`, seed }));
@@ -78,8 +79,6 @@ export function CallbotPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [playing, setPlaying] = useState(false);
-  const speech = useSpeech();
-  const recognition = useSpeechRecognition();
   const [stepIndex, setStepIndex] = useState(0);
   const [editingStep, setEditingStep] = useState<CallbotScriptStep | undefined>();
   const [detailResult, setDetailResult] = useState<CallbotResult | undefined>();
@@ -103,6 +102,9 @@ export function CallbotPage() {
   const simTimer = useRef<number | undefined>(undefined);
 
   const campaign = state.callbotCampaigns.find((item) => item.id === selectedId) ?? state.callbotCampaigns[0];
+  // Truyền nhãn giọng để backend tự ánh xạ sang giọng tiếng Việt thật.
+  const speech = useSpeech(campaign?.voice);
+  const recognition = useSpeechRecognition();
   const customerName = useCallback(
     (id: string) => state.customers.find((customer) => customer.id === id)?.name ?? "Khách hàng",
     [state.customers],
@@ -253,8 +255,8 @@ export function CallbotPage() {
   const nextReplyStep = spokenReplies.length;
 
   const startSpokenReply = useCallback(() => {
-    if (!recognition.supported) {
-      dispatch({ type: "toast", message: "Trình duyệt không hỗ trợ nhận diện giọng nói", tone: "warn" });
+    if (!recognition.backend && !recognition.supported) {
+      dispatch({ type: "toast", message: "Không có cách ghi âm: máy chủ chưa chạy và trình duyệt không hỗ trợ", tone: "warn" });
       return;
     }
     if (nextReplyStep >= campaign.script.length) {
@@ -469,7 +471,7 @@ export function CallbotPage() {
                         size="sm"
                         variant={recognition.listening ? "danger" : "outline"}
                         onClick={() => (recognition.listening ? recognition.stop() : startSpokenReply())}
-                        disabled={!recognition.supported && !recognition.listening}
+                        disabled={!recognition.backend && !recognition.supported && !recognition.listening}
                       >
                         <IconMic size={14} /> {recognition.listening ? "Đang nghe..." : "Khách nói"}
                       </Button>
@@ -605,9 +607,9 @@ export function CallbotPage() {
                           </button>
                         ) : null}
                       </p>
-                      {!recognition.supported ? (
+                      {!recognition.backend && !recognition.supported ? (
                         <p className="mt-2 text-[11.5px] leading-5 text-[#b45309]">
-                          Trình duyệt này không hỗ trợ nhận diện giọng nói. Vẫn có thể chạy mô phỏng bằng lời mẫu.
+                          Máy chủ giọng nói chưa chạy và trình duyệt này không hỗ trợ ghi âm. Vẫn có thể chạy mô phỏng bằng lời mẫu.
                         </p>
                       ) : spokenReplies.length === 0 ? (
                         <p className="mt-2 text-[11.5px] leading-5 text-[#8492a0]">
@@ -733,7 +735,7 @@ export function CallbotPage() {
                                       speech.speakingId === step.id ? "bg-[#0f8b98] text-white" : "bg-[#f1f5f8] text-[#0f8b98] hover:bg-[#e5f7f9]"
                                     }`}
                                     aria-label="Nghe thử"
-                                    title={speech.supported ? "Nghe thử bằng giọng trình duyệt" : "Trình duyệt không hỗ trợ đọc tiếng nói"}
+                                    title={speech.backend ? "Nghe thử bằng giọng máy chủ Callio" : speech.supported ? "Nghe thử bằng giọng trình duyệt" : "Không có cách đọc tiếng nói"}
                                   >
                                     <IconPlay size={14} />
                                   </button>
@@ -792,11 +794,9 @@ export function CallbotPage() {
                           </Button>
                         </div>
                         <p className="mt-2 text-[11.5px] text-[#8492a0]">
-                          {speech.supported
-                            ? speech.voices.some((voice) => voice.lang.toLowerCase().startsWith("vi"))
-                              ? "Đang đọc bằng giọng tiếng Việt có sẵn trên thiết bị."
-                              : "Thiết bị chưa có giọng tiếng Việt; sẽ đọc bằng giọng gần nhất."
-                            : "Trình duyệt này không hỗ trợ đọc tiếng nói."}
+                          {speech.backend || speech.supported
+                            ? voiceSourceLabel(speech.backend, speech.voices.some((voice) => voice.lang.toLowerCase().startsWith("vi")))
+                            : "Trình duyệt này không hỗ trợ đọc tiếng nói, và máy chủ giọng đọc chưa chạy."}
                         </p>
                       </div>
 
@@ -1162,9 +1162,9 @@ export function CallbotPage() {
           </Button>
         }
       >
-        {!speech.supported ? (
+        {!speech.backend && !speech.supported ? (
           <p className="mb-3 rounded-2xl bg-[#fdf1e0] px-3.5 py-3 text-[12.5px] leading-6 text-[#b45309]">
-            Trình duyệt này không hỗ trợ đọc tiếng nói, nên không nghe thử được. Vẫn có thể chọn giọng để lưu vào chiến dịch.
+            Máy chủ giọng đọc chưa chạy và trình duyệt này không hỗ trợ đọc tiếng nói, nên không nghe thử được. Vẫn có thể chọn giọng để lưu vào chiến dịch.
           </p>
         ) : null}
         <ul className="space-y-2.5">
@@ -1183,7 +1183,11 @@ export function CallbotPage() {
                     <span>
                       <span className="block text-[13.5px] font-bold text-[#111a22]">{voice}</span>
                       <span className="block text-[11.5px] text-[#8492a0]">
-                        {matched ? `Thiết bị đọc bằng: ${matched.name}` : "Chưa tìm thấy giọng phù hợp trên thiết bị"}
+                        {speech.backend
+                          ? "Máy chủ Callio đọc bằng giọng tiếng Việt."
+                          : matched
+                            ? `Thiết bị đọc bằng: ${matched.name}`
+                            : "Chưa tìm thấy giọng phù hợp trên thiết bị"}
                       </span>
                     </span>
                   </span>
@@ -1193,7 +1197,7 @@ export function CallbotPage() {
                   <Button
                     size="sm"
                     variant="outline"
-                    disabled={!speech.supported}
+                    disabled={!speech.backend && !speech.supported}
                     onClick={() => {
                       const preview = `Xin chào, tôi là ${voice.replace(/^Giọng\s+/, "")}. Đây là giọng đọc của trợ lý ảo Callio.`;
                       speech.speak(preview, profile, `preview-${voice}`);

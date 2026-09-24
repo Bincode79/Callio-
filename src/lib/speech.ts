@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fillVariables } from "./callbot";
+import { probeVoiceApi, synthesizeSpeech, transcribeSpeech } from "./voiceApi";
 import type { CallbotCampaign, CallbotScriptStep, Customer } from "./types";
 
 /**
@@ -91,6 +92,8 @@ export function speechSupported(): boolean {
 
 interface UseSpeechValue {
   supported: boolean;
+  /** Backend giọng nói (backend/voice) có sống không; có thì ưu tiên dùng. */
+  backend: boolean;
   /** Giọng thật của trình duyệt khớp với từng hồ sơ, để giao diện nói rõ đang dùng gì. */
   voices: SpeechSynthesisVoice[];
   /** Mã đoạn đang đọc, hoặc mã danh sách khi đang đọc cả kịch bản. */
@@ -103,11 +106,30 @@ interface UseSpeechValue {
 /**
  * Bọc Web Speech API thành hook React: nạp danh sách giọng (có thể về muộn nên
  * phải nghe `voiceschanged`), đọc từng đoạn và dừng sạch khi rời trang.
+ *
+ * Nếu backend giọng nói của Callio đang chạy (`backend/voice`), ưu tiên phát audio
+ * do backend tổng hợp — giọng tiếng Việt tốt hơn và giống nhau trên mọi thiết bị.
+ * `voiceLabel` là nhãn sản phẩm (ví dụ "Giọng nữ miền Bắc - Linh An") để backend
+ * tự ánh xạ sang mã giọng.
  */
-export function useSpeech(): UseSpeechValue {
+export function useSpeech(voiceLabel?: string): UseSpeechValue {
   const supported = speechSupported();
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
+  const [backend, setBackend] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const cancelledRef = useRef(false);
+
+  // Dò backend một lần khi hook được dùng; không có thì im lặng lùi về trình duyệt.
+  useEffect(() => {
+    let alive = true;
+    probeVoiceApi().then((ok) => {
+      if (alive) setBackend(ok);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!supported) return;
@@ -122,9 +144,23 @@ export function useSpeech(): UseSpeechValue {
     };
   }, [supported]);
 
+  // Nhả audio và dừng đọc khi rời trang để không rò rỉ bộ nhớ/blob URL.
+  useEffect(
+    () => () => {
+      cancelledRef.current = true;
+      audioRef.current?.pause();
+      audioRef.current = null;
+    },
+    [],
+  );
+
   const stop = useCallback(() => {
-    if (!supported) return;
-    window.speechSynthesis.cancel();
+    cancelledRef.current = true;
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    if (supported) window.speechSynthesis.cancel();
     setSpeakingId(null);
   }, [supported]);
 
@@ -142,7 +178,8 @@ export function useSpeech(): UseSpeechValue {
     [],
   );
 
-  const speak = useCallback(
+  /** Đọc bằng Web Speech API của trình duyệt (đường lùi khi không có backend). */
+  const speakViaBrowser = useCallback(
     (text: string, profile: SpeechProfile, id: string) => {
       if (!supported || text.trim() === "") return false;
       const synth = window.speechSynthesis;
@@ -158,7 +195,7 @@ export function useSpeech(): UseSpeechValue {
     [supported, applyProfile],
   );
 
-  const speakSegments = useCallback(
+  const speakSegmentsViaBrowser = useCallback(
     (segments: SpeechSegment[], profile: SpeechProfile, batchId: string, onSegment?: (index: number) => void) => {
       if (!supported || segments.length === 0) return false;
       const synth = window.speechSynthesis;
@@ -181,8 +218,100 @@ export function useSpeech(): UseSpeechValue {
     [supported, applyProfile],
   );
 
-  return { supported, voices, speakingId, speak, speakSegments, stop };
+  /** Đọc một đoạn bằng audio của backend; trả false nếu backend lỗi để gọi chỗ lùi. */
+  const speakViaBackend = useCallback(
+    async (text: string, id: string): Promise<boolean> => {
+      try {
+        const blob = await synthesizeSpeech(text, voiceLabel ?? "");
+        // Người dùng có thể đã bấm dừng trong lúc chờ mạng; đừng phát nữa.
+        if (cancelledRef.current) return true;
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audioRef.current = audio;
+        audio.onended = () => {
+          URL.revokeObjectURL(url);
+          setSpeakingId((current) => (current === id ? null : current));
+        };
+        audio.onerror = () => {
+          URL.revokeObjectURL(url);
+          setSpeakingId((current) => (current === id ? null : current));
+        };
+        await audio.play();
+        setSpeakingId(id);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [voiceLabel],
+  );
+
+  const speak = useCallback(
+    (text: string, profile: SpeechProfile, id: string) => {
+      if (text.trim() === "") return false;
+      cancelledRef.current = false;
+      if (backend) {
+        // Không chờ: giao diện báo đã bắt đầu; lỗi mạng thì lùi về trình duyệt.
+        void speakViaBackend(text, id).then((ok) => {
+          if (!ok) speakViaBrowser(text, profile, id);
+        });
+        return true;
+      }
+      if (!supported) return false;
+      return speakViaBrowser(text, profile, id);
+    },
+    [backend, supported, speakViaBackend, speakViaBrowser],
+  );
+
+  const speakSegments = useCallback(
+    (segments: SpeechSegment[], profile: SpeechProfile, batchId: string, onSegment?: (index: number) => void) => {
+      if (segments.length === 0) return false;
+      cancelledRef.current = false;
+      if (backend) {
+        // Đọc tuần tự qua backend để báo đúng chỉ số bước đang đọc.
+        void (async () => {
+          for (let index = 0; index < segments.length; index += 1) {
+            if (cancelledRef.current) return;
+            onSegment?.(index);
+            const ok = await speakViaBackend(segments[index].text, `${batchId}-${index}`);
+            if (!ok) {
+              // Backend hỏng giữa chừng: đọc nốt phần còn lại bằng trình duyệt.
+              speakViaBrowser(segments.slice(index).map((s) => s.text).join(" "), profile, batchId);
+              return;
+            }
+            // Chờ đoạn hiện tại phát xong mới sang đoạn sau.
+            await waitForAudioEnd(audioRef);
+            if (cancelledRef.current) return;
+          }
+          setSpeakingId((current) => (current === batchId ? null : current));
+        })();
+        setSpeakingId(batchId);
+        return true;
+      }
+      if (!supported) return false;
+      return speakSegmentsViaBrowser(segments, profile, batchId, onSegment);
+    },
+    [backend, supported, speakViaBackend, speakViaBrowser, speakSegmentsViaBrowser],
+  );
+
+  return { supported, backend, voices, speakingId, speak, speakSegments, stop };
 }
+
+/** Chờ thẻ audio hiện tại phát xong; dùng khi đọc tuần tự qua backend. */
+function waitForAudioEnd(ref: { current: HTMLAudioElement | null }): Promise<void> {
+  const audio = ref.current;
+  if (!audio) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      audio.removeEventListener("ended", done);
+      audio.removeEventListener("error", done);
+      resolve();
+    };
+    audio.addEventListener("ended", done);
+    audio.addEventListener("error", done);
+  });
+}
+
 
 /* ------------------------------------------------------------------ *
  * Nhận diện giọng nói (Speech Recognition)
@@ -248,6 +377,8 @@ export function collectTranscript(event: SpeechRecognitionEventLike, fromIndex: 
 
 interface UseSpeechRecognitionValue {
   supported: boolean;
+  /** Backend giọng nói có sống không; có thì ghi âm rồi gửi lên `/api/stt`. */
+  backend: boolean;
   listening: boolean;
   /** Câu nhận diện được gần nhất, chưa chuẩn hoá. */
   transcript: string;
@@ -261,16 +392,36 @@ interface UseSpeechRecognitionValue {
 /**
  * Bọc SpeechRecognition thành hook React. Mỗi lần `start` là một phiên nghe mới;
  * kết quả được gộp dần và trả về qua `transcript`.
+ *
+ * Nếu backend giọng nói đang chạy, hook ghi âm qua `MediaRecorder` rồi gửi lên
+ * `/api/stt` (nhận diện tiếng Việt tốt hơn trên nhiều máy); nếu không thì dùng
+ * `SpeechRecognition` của trình duyệt.
  */
 export function useSpeechRecognition(lang: string = DEFAULT_VOICE_LANG): UseSpeechRecognitionValue {
   const supported = recognitionSupported();
+  const [backend, setBackend] = useState(false);
   const [listening, setListening] = useState(false);
   const [transcript, setTranscript] = useState("");
   const [error, setError] = useState<string | null>(null);
   const instanceRef = useRef<SpeechRecognitionLike | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+
+  useEffect(() => {
+    let alive = true;
+    probeVoiceApi().then((ok) => {
+      if (alive) setBackend(ok);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const stop = useCallback(() => {
     instanceRef.current?.stop();
+    if (recorderRef.current && recorderRef.current.state !== "inactive") {
+      recorderRef.current.stop();
+    }
     setListening(false);
   }, []);
 
@@ -279,7 +430,47 @@ export function useSpeechRecognition(lang: string = DEFAULT_VOICE_LANG): UseSpee
     setError(null);
   }, []);
 
+  /** Ghi âm micro rồi gửi lên backend để nhận diện. */
+  const startViaBackend = useCallback(async (): Promise<boolean> => {
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) return false;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      chunksRef.current = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunksRef.current.push(event.data);
+      };
+      recorder.onstop = () => {
+        for (const track of stream.getTracks()) track.stop();
+        const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
+        setListening(false);
+        if (blob.size === 0) {
+          setError("no-speech");
+          return;
+        }
+        transcribeSpeech(blob)
+          .then((text) => setTranscript(text))
+          .catch((err: unknown) => setError(err instanceof Error ? err.message : "stt-failed"));
+      };
+      recorderRef.current = recorder;
+      setTranscript("");
+      setError(null);
+      recorder.start();
+      setListening(true);
+      return true;
+    } catch (err) {
+      // Thường là người dùng chưa cấp quyền micro.
+      setError(err instanceof Error && err.name === "NotAllowedError" ? "not-allowed" : "mic-failed");
+      setListening(false);
+      return false;
+    }
+  }, []);
+
   const start = useCallback(() => {
+    if (backend) {
+      void startViaBackend();
+      return true;
+    }
     if (!supported) return false;
     const Ctor = recognitionCtor();
     if (!Ctor) return false;
@@ -312,9 +503,15 @@ export function useSpeechRecognition(lang: string = DEFAULT_VOICE_LANG): UseSpee
       setListening(false);
       return false;
     }
-  }, [supported, lang]);
+  }, [backend, startViaBackend, supported, lang]);
 
-  useEffect(() => () => instanceRef.current?.abort(), []);
+  useEffect(
+    () => () => {
+      instanceRef.current?.abort();
+      if (recorderRef.current && recorderRef.current.state !== "inactive") recorderRef.current.stop();
+    },
+    [],
+  );
 
-  return { supported, listening, transcript, error, start, stop, reset };
+  return { supported, backend, listening, transcript, error, start, stop, reset };
 }

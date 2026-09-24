@@ -219,6 +219,25 @@ mô phỏng với câu thật thay cho lời mẫu ở bước tương ứng.
 - Trình duyệt không hỗ trợ nhận diện (Safari/Firefox thường không) thì nút bị vô hiệu
   và giao diện nói rõ; vẫn mô phỏng được bằng lời mẫu.
 
+### Backend giọng nói thật (`backend/voice`)
+
+Giao diện ưu tiên dùng backend khi có, để giọng đọc/nhận diện tiếng Việt tốt hơn và
+giống nhau trên mọi thiết bị. Backend là FastAPI nhỏ, **miễn phí, không cần API key**:
+
+- `POST /api/tts` — `edge-tts`; `POST /api/stt` — `faster-whisper` chạy cục bộ.
+- Test backend dùng `unittest` có sẵn (không thêm runner) và **tiêm engine giả**, nên
+  chạy được khi máy chưa cài model; CI có job riêng chỉ cài `fastapi`/`httpx`… để nhanh.
+- `src/lib/voiceApi.ts` dò backend qua `/api/health`; `useSpeech`/`useSpeechRecognition`
+  tự lùi về Web Speech API khi backend không chạy, và lùi tiếp sang trình duyệt nếu
+  backend lỗi giữa chừng.
+- Ánh xạ nhãn giọng sản phẩm → mã giọng edge-tts nằm ở `app/voices.py`; phải xét **"nữ"
+  trước "nam"** vì "nam" nằm trong "miền Nam".
+- Vite dev chuyển tiếp `/api` sang `http://localhost:8000` (đổi bằng
+  `CALLIO_VOICE_API_TARGET`). Khi deploy, đặt `VITE_VOICE_API` nếu backend ở cổng khác.
+
+Lưu ý: `edge-tts` dùng dịch vụ **không chính thức** của Microsoft (miễn phí nhưng
+không có SLA). Chi tiết và cảnh báo đầy đủ ở `backend/voice/README.md`.
+
 ## Quy ước
 
 - Toàn bộ nội dung hiển thị cho người dùng là tiếng Việt. Slug route dùng dạng
