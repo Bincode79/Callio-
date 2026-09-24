@@ -469,10 +469,10 @@ export function TelesalesPage() {
               <p className="mt-2 text-[13px] font-bold text-[#111a22]">{detail.lastResult}</p>
             </div>
             <div className="grid grid-cols-2 gap-2.5">
-              <Button variant="outline" onClick={() => dispatch({ type: "toast", message: `Đã gửi báo giá cho ${customerOf(detail.customerId)?.name} qua Zalo`, tone: "success" })}>
+              <Button variant="outline" onClick={() => dispatch({ type: "sendQuote", taskId: detail.id })}>
                 <IconSend size={15} /> Gửi báo giá
               </Button>
-              <Button variant="outline" onClick={() => dispatch({ type: "toast", message: "Đã tạo lịch hẹn demo cho khách hàng", tone: "success" })}>
+              <Button variant="outline" onClick={() => dispatch({ type: "scheduleDemo", taskId: detail.id })}>
                 <IconClock size={15} /> Đặt lịch demo
               </Button>
             </div>

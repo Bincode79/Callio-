@@ -163,6 +163,26 @@ Tạo hồ sơ thủ công trên ACRM cũng qua reducer (`createCustomer`): cấ
 `nextCustomerCode` (không trùng mã sẵn có), gắn chủ sở hữu là người đang đăng nhập,
 và ghi một `TimelineEvent` "Tạo hồ sơ khách hàng" để hồ sơ mới có sẵn hành trình.
 
+### Tổng đài, telesales và workflow
+
+Các tác vụ thao tác cũng đi qua reducer thay vì chỉ báo toast:
+
+- **Tổng đài**: `createCall` mở cuộc gọi ra đang đàm thoại; `transferCall` đổi hàng
+  đợi; `saveCallNote` ghi chú và **thêm một `TimelineEvent` "Ghi chú cuộc gọi"** vào
+  hồ sơ khách hàng (kèm cập nhật `lastContactAt`) vì ghi chú thuộc về hồ sơ, không
+  chỉ nằm ở nhật ký tổng đài.
+- **Telesales**: `sendQuote` và `scheduleDemo` đổi `lastResult` của task **và** ghi
+  sự kiện tương ứng vào hành trình khách hàng.
+- **Workflow**: `createWorkflow` tạo bản nháp có sẵn một bước kích hoạt;
+  `updateWorkflowNode` sửa tên/mô tả một bước; `runWorkflow` **chỉ chạy khi workflow
+  đang hoạt động** — bản nháp hoặc tạm dừng sẽ báo lỗi thay vì giả vờ thành công —
+  và ghi thêm một `WorkflowRun` vào nhật ký (nhật ký đọc từ `workflow.runs`, không
+  sinh giả trong lúc render).
+- **Tệp lead**: `syncLeads` chỉ phân loại lead đang chờ, không kéo lại lead đã chia
+  hay đã loại; `mergeDuplicateLeads` bỏ cờ trùng và đánh dấu đã gộp.
+
+Workflow mới tạo được chèn lên đầu và tự chọn sẵn, cùng cách với chiến dịch Callbot.
+
 ## Quy ước
 
 - Toàn bộ nội dung hiển thị cho người dùng là tiếng Việt. Slug route dùng dạng

@@ -385,6 +385,62 @@ describe("cuộc gọi tổng đài", () => {
     const next = reducer(state, { type: "updateCall", id: target.id, patch: { status: "completed" } });
     assert.equal(next.calls.find((call) => call.id === target.id)?.status, "completed");
   });
+
+  it("gọi ra tạo cuộc gọi mới đang đàm thoại cho đúng khách", () => {
+    const state = freshState();
+    const customer = state.customers[0];
+    const before = state.calls.length;
+
+    const next = reducer(state, { type: "createCall", customerId: customer.id, queue: "Kinh doanh - Miền Bắc" });
+    const created = next.calls[0];
+
+    assert.equal(next.calls.length, before + 1);
+    assert.equal(created.customerId, customer.id);
+    assert.equal(created.direction, "outbound");
+    assert.equal(created.status, "talking", "cuộc gọi ra vừa tạo phải đang đàm thoại");
+    assert.equal(created.agent, state.currentUser.name);
+    assert.equal(created.queue, "Kinh doanh - Miền Bắc");
+    assert.equal(created.durationSec, 0);
+  });
+
+  it("không tạo cuộc gọi cho khách không tồn tại", () => {
+    const state = freshState();
+    const next = reducer(state, { type: "createCall", customerId: "KH-KHONG-CO", queue: "Hàng đợi" });
+    assert.equal(next, state);
+  });
+
+  it("chuyển máy đổi hàng đợi của đúng cuộc gọi", () => {
+    const state = freshState();
+    const target = state.calls[0];
+    const otherQueueBefore = state.calls[1]?.queue;
+
+    const next = reducer(state, { type: "transferCall", id: target.id, queue: "CSKH - Miền Nam" });
+    assert.equal(next.calls.find((call) => call.id === target.id)?.queue, "CSKH - Miền Nam");
+    assert.equal(next.calls.find((call) => call.id === state.calls[1].id)?.queue, otherQueueBefore, "cuộc gọi khác không đổi");
+  });
+
+  it("lưu ghi chú thì ghi vào hành trình khách hàng", () => {
+    const state = freshState();
+    const target = state.calls[0];
+    const customer = state.customers.find((item) => item.id === target.customerId);
+    assert.ok(customer, "cuộc gọi phải trỏ tới một khách hàng có thật");
+    const eventsBefore = customer.timeline.length;
+
+    const next = reducer(state, { type: "saveCallNote", id: target.id, note: "Khách quan tâm gói Growth" });
+    const updatedCall = next.calls.find((call) => call.id === target.id);
+    const updatedCustomer = next.customers.find((item) => item.id === target.customerId);
+
+    assert.equal(updatedCall?.note, "Khách quan tâm gói Growth");
+    assert.equal(updatedCustomer?.timeline.length, eventsBefore + 1, "ghi chú phải vào hành trình khách hàng");
+    assert.equal(updatedCustomer?.timeline[0]?.detail, "Khách quan tâm gói Growth");
+    assert.equal(updatedCustomer?.timeline[0]?.channel, "call");
+  });
+
+  it("không ghi gì khi cuộc gọi không tồn tại", () => {
+    const state = freshState();
+    const next = reducer(state, { type: "saveCallNote", id: "CALL-KHONG-CO", note: "x" });
+    assert.equal(next, state);
+  });
 });
 
 describe("việc telesales", () => {
@@ -412,6 +468,144 @@ describe("việc telesales", () => {
 
     assert.equal(updated?.attempts, attemptsBefore + 1);
     assert.match(updated?.lastResult ?? "", /Hẹn gọi lại/);
+  });
+
+  it("gửi báo giá ghi vào hành trình khách hàng", () => {
+    const state = freshState();
+    const task = state.telesalesTasks[0];
+    const customer = state.customers.find((item) => item.id === task.customerId);
+    assert.ok(customer, "task phải trỏ tới khách hàng có thật");
+    const eventsBefore = customer.timeline.length;
+
+    const next = reducer(state, { type: "sendQuote", taskId: task.id });
+    const updatedCustomer = next.customers.find((item) => item.id === task.customerId);
+
+    assert.match(next.telesalesTasks.find((item) => item.id === task.id)?.lastResult ?? "", /báo giá/);
+    assert.equal(updatedCustomer?.timeline.length, eventsBefore + 1);
+    assert.equal(updatedCustomer?.timeline[0]?.title, "Đã gửi báo giá");
+  });
+
+  it("đặt lịch demo ghi vào hành trình khách hàng", () => {
+    const state = freshState();
+    const task = state.telesalesTasks[0];
+    const customer = state.customers.find((item) => item.id === task.customerId);
+    assert.ok(customer);
+    const eventsBefore = customer.timeline.length;
+
+    const next = reducer(state, { type: "scheduleDemo", taskId: task.id });
+    const updatedCustomer = next.customers.find((item) => item.id === task.customerId);
+
+    assert.equal(updatedCustomer?.timeline.length, eventsBefore + 1);
+    assert.equal(updatedCustomer?.timeline[0]?.title, "Đã đặt lịch hẹn demo");
+  });
+
+  it("không ghi gì khi task không tồn tại", () => {
+    const state = freshState();
+    assert.equal(reducer(state, { type: "sendQuote", taskId: "TS-KHONG-CO" }), state);
+    assert.equal(reducer(state, { type: "scheduleDemo", taskId: "TS-KHONG-CO" }), state);
+  });
+});
+
+describe("workflow", () => {
+  it("sửa bước thì chỉ đụng đúng bước được chọn", () => {
+    const state = freshState();
+    const workflow = state.workflows[0];
+    const node = workflow.nodes[0];
+    const otherNodesBefore = workflow.nodes.slice(1);
+
+    const next = reducer(state, {
+      type: "updateWorkflowNode",
+      workflowId: workflow.id,
+      nodeId: node.id,
+      patch: { title: "Bước đã sửa", detail: "Mô tả mới" },
+    });
+    const updated = next.workflows.find((item) => item.id === workflow.id);
+
+    assert.equal(updated?.nodes[0]?.title, "Bước đã sửa");
+    assert.equal(updated?.nodes[0]?.detail, "Mô tả mới");
+    assert.deepEqual(updated?.nodes.slice(1), otherNodesBefore);
+  });
+
+  it("tạo workflow mới ở dạng bản nháp, chèn lên đầu", () => {
+    const state = freshState();
+    const before = state.workflows.length;
+
+    const next = reducer(state, { type: "createWorkflow", draft: { name: "Workflow kiểm thử", trigger: "Lead mới từ Ads" } });
+    const created = next.workflows[0];
+
+    assert.equal(next.workflows.length, before + 1);
+    assert.equal(created.name, "Workflow kiểm thử");
+    assert.equal(created.status, "ban-nhap");
+    assert.equal(created.runsToday, 0);
+    assert.equal(created.nodes.length, 1, "workflow mới chỉ có bước kích hoạt");
+    assert.deepEqual(created.runs, []);
+  });
+
+  it("chạy thử workflow đang hoạt động thì ghi thêm một lượt chạy", () => {
+    const state = freshState();
+    const workflow = state.workflows.find((item) => item.status === "dang-chay");
+    assert.ok(workflow, "cần một workflow đang chạy");
+    const runsBefore = workflow.runs.length;
+
+    const next = reducer(state, { type: "runWorkflow", id: workflow.id });
+    const updated = next.workflows.find((item) => item.id === workflow.id);
+
+    assert.equal(updated?.runs.length, runsBefore + 1);
+    assert.equal(updated?.runsToday, workflow.runsToday + 1);
+    assert.equal(updated?.runs[0]?.ok, true);
+  });
+
+  it("không chạy thử workflow đang tạm dừng hoặc bản nháp", () => {
+    const state = freshState();
+    const paused = state.workflows.find((item) => item.status === "tam-dung") ?? state.workflows.find((item) => item.status === "ban-nhap");
+    assert.ok(paused, "cần một workflow không hoạt động");
+
+    const next = reducer(state, { type: "runWorkflow", id: paused.id });
+    assert.equal(next.workflows.find((item) => item.id === paused.id)?.runsToday, paused.runsToday, "không được tăng lượt chạy");
+    assert.equal(next.workflows.find((item) => item.id === paused.id)?.runs.length, paused.runs.length);
+  });
+
+  it("không làm gì khi chạy workflow không tồn tại", () => {
+    const state = freshState();
+    assert.equal(reducer(state, { type: "runWorkflow", id: "WF-KHONG-CO" }), state);
+  });
+});
+
+describe("tệp lead", () => {
+  it("đồng bộ chuyển lead chờ phân loại sang đã phân loại", () => {
+    const state = freshState();
+    const pendingBefore = state.leads.filter((lead) => lead.status === "moi").length;
+    assert.ok(pendingBefore > 0, "cần lead chờ phân loại để kiểm tra");
+
+    const next = reducer(state, { type: "syncLeads" });
+    assert.equal(next.leads.filter((lead) => lead.status === "moi").length, 0, "không còn lead chờ phân loại");
+    assert.equal(next.leads.filter((lead) => lead.status === "da-phan-loai").length, pendingBefore + state.leads.filter((lead) => lead.status === "da-phan-loai").length);
+  });
+
+  it("đồng bộ không kéo lead đã chia hoặc đã loại trở lại", () => {
+    const state = freshState();
+    const assigned = state.leads.find((lead) => lead.status === "da-chia");
+    const discarded = state.leads.find((lead) => lead.status === "loai");
+
+    const next = reducer(state, { type: "syncLeads" });
+    if (assigned) assert.equal(next.leads.find((lead) => lead.id === assigned.id)?.status, "da-chia");
+    if (discarded) assert.equal(next.leads.find((lead) => lead.id === discarded.id)?.status, "loai");
+  });
+
+  it("gộp lead trùng và bỏ cờ trùng", () => {
+    const state = freshState();
+    const duplicatesBefore = state.leads.filter((lead) => lead.duplicate).length;
+    assert.ok(duplicatesBefore > 0, "cần lead trùng để kiểm tra");
+
+    const next = reducer(state, { type: "mergeDuplicateLeads" });
+    assert.equal(next.leads.filter((lead) => lead.duplicate).length, 0, "sau khi gộp không còn cờ trùng");
+  });
+
+  it("báo rõ khi không có lead trùng để gộp", () => {
+    const state = freshState();
+    const noDuplicates: AppState = { ...state, leads: state.leads.map((lead) => ({ ...lead, duplicate: false })) };
+    const next = reducer(noDuplicates, { type: "mergeDuplicateLeads" });
+    assert.deepEqual(next.leads, noDuplicates.leads, "không có gì để gộp thì giữ nguyên tệp");
   });
 });
 
@@ -576,6 +770,12 @@ describe("tính bất biến của state", () => {
       type: "createCustomer",
       draft: { name: "Bất biến", company: "Cty", phone: "0900000000", email: "a@b.vn", address: "HN", source: "website", note: "x" },
     });
+    reducer(state, { type: "createCall", customerId: state.customers[0].id, queue: "Hàng đợi" });
+    reducer(state, { type: "saveCallNote", id: state.calls[0].id, note: "ghi chú" });
+    reducer(state, { type: "sendQuote", taskId: state.telesalesTasks[0].id });
+    reducer(state, { type: "runWorkflow", id: state.workflows[0].id });
+    reducer(state, { type: "syncLeads" });
+    reducer(state, { type: "mergeDuplicateLeads" });
 
     assert.deepEqual(state, snapshot, "reducer phải trả về state mới, không sửa state cũ");
   });

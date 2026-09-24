@@ -272,6 +272,15 @@ export interface WorkflowEdge {
   label?: string;
 }
 
+/** Một lượt chạy workflow, ghi lại để nhật ký phản ánh đúng thực tế. */
+export interface WorkflowRun {
+  id: string;
+  leadName: string;
+  result: string;
+  ok: boolean;
+  at: string;
+}
+
 export interface Workflow {
   id: string;
   name: string;
@@ -283,4 +292,5 @@ export interface Workflow {
   updatedAt: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
+  runs: WorkflowRun[];
 }

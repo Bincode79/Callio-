@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useApp } from "../lib/store";
 import {
   formatNumber,
@@ -45,9 +45,23 @@ export function UleadUflowPage() {
   const [status, setStatus] = useState("all");
   const [workflowId, setWorkflowId] = useState(state.workflows[0]?.id ?? "");
   const [nodeDetail, setNodeDetail] = useState<WorkflowNode | undefined>();
+  const [nodeDraft, setNodeDraft] = useState({ title: "", detail: "" });
   const [assignOpen, setAssignOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [workflowDraft, setWorkflowDraft] = useState({ name: "", trigger: "Lead mới từ Facebook / Google Ads" });
 
   const workflow = state.workflows.find((item) => item.id === workflowId) ?? state.workflows[0];
+
+  // Workflow mới tạo được chèn lên đầu; tự chọn nó để người dùng thấy ngay thay
+  // vì phải bấm vào danh sách.
+  const workflowCount = state.workflows.length;
+  const previousCount = useRef(workflowCount);
+  useEffect(() => {
+    if (workflowCount > previousCount.current && state.workflows[0]) {
+      setWorkflowId(state.workflows[0].id);
+    }
+    previousCount.current = workflowCount;
+  }, [workflowCount, state.workflows]);
 
   const filteredLeads = useMemo(
     () =>
@@ -86,10 +100,10 @@ export function UleadUflowPage() {
         description="Gom dữ liệu khách hàng tiềm năng từ mọi kênh, chấm điểm tự động, chia cho sales theo luật và thiết lập quy trình làm việc không cần thao tác thủ công."
         actions={
           <>
-            <Button variant="outline" onClick={() => dispatch({ type: "toast", message: "Đã đồng bộ lead mới từ 5 nguồn dữ liệu", tone: "success" })}>
+            <Button variant="outline" onClick={() => dispatch({ type: "syncLeads" })}>
               <IconRefresh size={16} /> Đồng bộ lead
             </Button>
-            <Button variant="gold" onClick={() => dispatch({ type: "toast", message: "Đã tạo workflow mới ở trạng thái bản nháp", tone: "success" })}>
+            <Button variant="gold" onClick={() => setCreateOpen(true)}>
               <IconPlus size={16} /> Tạo workflow
             </Button>
           </>
@@ -273,7 +287,7 @@ export function UleadUflowPage() {
                   </div>
                 ))}
               </div>
-              <Button className="mt-5 w-full" variant="outline" onClick={() => dispatch({ type: "toast", message: "Đã chạy kiểm tra và làm sạch toàn bộ tệp lead", tone: "success" })}>
+              <Button className="mt-5 w-full" variant="outline" onClick={() => dispatch({ type: "mergeDuplicateLeads" })}>
                 <IconRefresh size={15} /> Làm sạch dữ liệu
               </Button>
             </Card>
@@ -356,7 +370,7 @@ export function UleadUflowPage() {
                         <Button variant={workflow.status === "dang-chay" ? "outline" : "primary"} onClick={() => dispatch({ type: "toggleWorkflow", id: workflow.id })}>
                           {workflow.status === "dang-chay" ? "Tạm dừng" : "Kích hoạt"}
                         </Button>
-                        <Button variant="gold" onClick={() => dispatch({ type: "toast", message: "Đã chạy thử workflow với dữ liệu mẫu", tone: "success" })}>
+                        <Button variant="gold" onClick={() => dispatch({ type: "runWorkflow", id: workflow.id })}>
                           <IconSparkle size={15} /> Chạy thử
                         </Button>
                       </div>
@@ -436,7 +450,10 @@ export function UleadUflowPage() {
                             <button
                               key={node.id}
                               type="button"
-                              onClick={() => setNodeDetail(node)}
+                              onClick={() => {
+                                setNodeDetail(node);
+                                setNodeDraft({ title: node.title, detail: node.detail });
+                              }}
                               className="absolute overflow-hidden rounded-2xl border bg-white p-3.5 text-left shadow-[0_10px_30px_rgba(15,33,45,0.08)] transition hover:-translate-y-0.5 hover:border-[#0f8b98]"
                               style={{ left: node.x, top: node.y, width: NODE_WIDTH, height: NODE_HEIGHT, borderColor: `${meta.color}55` }}
                             >
@@ -459,17 +476,11 @@ export function UleadUflowPage() {
                     <CardHeader title="Nhật ký chạy workflow" subtitle="Kết quả các lần chạy gần nhất" />
                     <DataTable
                       rowKey={(row) => row.id}
-                      rows={Array.from({ length: 6 }, (_, index) => ({
-                        id: `RUN-${index}`,
-                        trigger: workflow.trigger,
-                        lead: state.leads[(index * 3) % state.leads.length]?.name ?? "Lead",
-                        result: index % 5 === 4 ? "Bỏ qua do trùng dữ liệu" : "Đã chia lead và gửi tin chào mừng",
-                        at: new Date(Date.now() - (index + 1) * 18 * 60000).toISOString(),
-                        ok: index % 5 !== 4,
-                      }))}
+                      rows={workflow.runs}
+                      emptyLabel="Chưa có lượt chạy nào"
                       columns={[
-                        { key: "lead", label: "Đối tượng", render: (row) => <span className="font-bold text-[#111a22]">{row.lead}</span> },
-                        { key: "trigger", label: "Kích hoạt", render: (row) => <span className="text-[12.5px] text-[#5c6a76]">{row.trigger}</span> },
+                        { key: "lead", label: "Đối tượng", render: (row) => <span className="font-bold text-[#111a22]">{row.leadName}</span> },
+                        { key: "trigger", label: "Kích hoạt", render: () => <span className="text-[12.5px] text-[#5c6a76]">{workflow.trigger}</span> },
                         {
                           key: "result",
                           label: "Kết quả",
@@ -496,7 +507,21 @@ export function UleadUflowPage() {
             <Button variant="ghost" onClick={() => setNodeDetail(undefined)}>
               Đóng
             </Button>
-            <Button onClick={() => dispatch({ type: "toast", message: "Đã lưu cấu hình bước trong workflow", tone: "success" })}>Lưu cấu hình</Button>
+            <Button
+              disabled={!workflow || !nodeDetail || nodeDraft.title.trim() === ""}
+              onClick={() => {
+                if (!workflow || !nodeDetail) return;
+                dispatch({
+                  type: "updateWorkflowNode",
+                  workflowId: workflow.id,
+                  nodeId: nodeDetail.id,
+                  patch: { title: nodeDraft.title.trim(), detail: nodeDraft.detail.trim() },
+                });
+                setNodeDetail(undefined);
+              }}
+            >
+              Lưu cấu hình
+            </Button>
           </>
         }
       >
@@ -506,10 +531,22 @@ export function UleadUflowPage() {
               <KeyValue label="Loại bước" value={nodeTypeMeta[nodeDetail.type].label} />
               <KeyValue label="Vị trí" value={`x: ${nodeDetail.x}, y: ${nodeDetail.y}`} />
             </div>
-            <div className="rounded-2xl bg-[#f8fafc] p-4">
-              <p className="text-[12px] font-bold uppercase tracking-[0.06em] text-[#8492a0]">Mô tả</p>
-              <p className="mt-2 text-[13px] leading-6 text-[#33414d]">{nodeDetail.detail}</p>
-            </div>
+            <label className="block">
+              <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Tên bước</span>
+              <input
+                className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]"
+                value={nodeDraft.title}
+                onChange={(event) => setNodeDraft((current) => ({ ...current, title: event.target.value }))}
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Mô tả</span>
+              <textarea
+                className="h-24 w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] leading-6 outline-none focus:border-[#0f8b98]"
+                value={nodeDraft.detail}
+                onChange={(event) => setNodeDraft((current) => ({ ...current, detail: event.target.value }))}
+              />
+            </label>
             <div className="rounded-2xl bg-[#f8fafc] p-4">
               <p className="text-[12px] font-bold uppercase tracking-[0.06em] text-[#8492a0]">Cấu hình mẫu</p>
               <ul className="mt-2 space-y-2 text-[12.5px] text-[#4a5763]">
@@ -520,6 +557,56 @@ export function UleadUflowPage() {
             </div>
           </div>
         ) : null}
+      </Modal>
+
+      <Modal
+        open={createOpen}
+        title="Tạo workflow mới"
+        subtitle="Quy trình mới bắt đầu ở dạng bản nháp, kích hoạt khi đã sẵn sàng"
+        onClose={() => setCreateOpen(false)}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setCreateOpen(false)}>
+              Huỷ
+            </Button>
+            <Button
+              disabled={workflowDraft.name.trim() === ""}
+              onClick={() => {
+                setCreateOpen(false);
+                dispatch({
+                  type: "createWorkflow",
+                  draft: { name: workflowDraft.name.trim(), trigger: workflowDraft.trigger.trim() || "Lead mới từ Ads" },
+                });
+                setWorkflowDraft({ name: "", trigger: "Lead mới từ Facebook / Google Ads" });
+              }}
+            >
+              Tạo workflow
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <label className="block">
+            <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Tên workflow</span>
+            <input
+              className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]"
+              placeholder="Chia lead theo khu vực"
+              value={workflowDraft.name}
+              onChange={(event) => setWorkflowDraft((current) => ({ ...current, name: event.target.value }))}
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Điều kiện kích hoạt</span>
+            <input
+              className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]"
+              value={workflowDraft.trigger}
+              onChange={(event) => setWorkflowDraft((current) => ({ ...current, trigger: event.target.value }))}
+            />
+          </label>
+          <div className="rounded-2xl bg-[#f8fafc] p-4 text-[12.5px] leading-6 text-[#4a5763]">
+            Workflow mới chỉ có bước kích hoạt. Bật workflow rồi chạy thử để kiểm tra trước khi thêm các bước xử lý.
+          </div>
+        </div>
       </Modal>
 
       <Modal

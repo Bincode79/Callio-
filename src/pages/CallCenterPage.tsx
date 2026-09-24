@@ -52,7 +52,8 @@ export function CallCenterPage() {
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [queueFilter, setQueueFilter] = useState("all");
-  const [detail, setDetail] = useState<CallRecord | undefined>();
+  const [detailId, setDetailId] = useState<string>();
+  const [noteDraft, setNoteDraft] = useState("");
   const [liveSeconds, setLiveSeconds] = useState(0);
 
   const activeCall = state.calls.find((call) => call.status === "talking") ?? state.calls[0];
@@ -63,6 +64,7 @@ export function CallCenterPage() {
   }, []);
 
   const queues = useMemo(() => Array.from(new Set(state.calls.map((call) => call.queue))), [state.calls]);
+  const detail = state.calls.find((call) => call.id === detailId);
   const customerName = useCallback(
     (id: string) => state.customers.find((customer) => customer.id === id)?.name ?? "Khách hàng",
     [state.customers],
@@ -71,6 +73,20 @@ export function CallCenterPage() {
     (id: string) => state.customers.find((customer) => customer.id === id)?.phone ?? "",
     [state.customers],
   );
+
+  /** Gọi ra: chọn khách chưa nằm trong cuộc gọi nào để tránh chồng chéo. */
+  const startOutboundCall = () => {
+    const busy = new Set(
+      state.calls.filter((call) => call.status === "talking" || call.status === "ringing").map((call) => call.customerId),
+    );
+    const target = state.customers.find((customer) => !busy.has(customer.id));
+    if (!target) {
+      dispatch({ type: "toast", message: "Mọi khách hàng đều đang trong cuộc gọi", tone: "warn" });
+      return;
+    }
+    dispatch({ type: "createCall", customerId: target.id, queue: queues[0] ?? "Kinh doanh - Miền Bắc" });
+    setTab("truc-tiep");
+  };
 
   const filtered = useMemo(
     () =>
@@ -134,7 +150,7 @@ export function CallCenterPage() {
             <Button variant="outline" onClick={() => dispatch({ type: "toast", message: "Đã xuất báo cáo cuộc gọi dạng Excel", tone: "success" })}>
               <IconDownload size={16} /> Xuất báo cáo
             </Button>
-            <Button onClick={() => dispatch({ type: "toast", message: "Đang kết nối cuộc gọi ra tới khách hàng đầu tiên trong danh sách", tone: "info" })}>
+            <Button onClick={startOutboundCall}>
               <IconPhone size={16} /> Gọi ra
             </Button>
           </>
@@ -233,7 +249,14 @@ export function CallCenterPage() {
               >
                 <IconPhoneOff size={16} /> Kết thúc
               </Button>
-              <Button variant="gold" onClick={() => dispatch({ type: "toast", message: "Đã chuyển cuộc gọi tới hàng đợi Kinh doanh - Miền Bắc", tone: "info" })}>
+              <Button
+                variant="gold"
+                onClick={() => {
+                  if (!activeCall) return;
+                  const nextQueue = queues.find((queue) => queue !== activeCall.queue) ?? activeCall.queue;
+                  dispatch({ type: "transferCall", id: activeCall.id, queue: nextQueue });
+                }}
+              >
                 <IconMic size={16} /> Chuyển máy
               </Button>
             </div>
@@ -321,7 +344,10 @@ export function CallCenterPage() {
           <DataTable
             rowKey={(row) => row.id}
             rows={tab === "truc-tiep" ? filtered.filter((call) => call.status === "talking" || call.status === "ringing") : filtered}
-            onRowClick={(row) => setDetail(row)}
+            onRowClick={(row) => {
+              setDetailId(row.id);
+              setNoteDraft(row.note);
+            }}
             emptyLabel="Không có cuộc gọi phù hợp"
             columns={[
               {
@@ -440,16 +466,22 @@ export function CallCenterPage() {
         open={Boolean(detail)}
         title={detail ? `Cuộc gọi ${detail.id}` : ""}
         subtitle={detail ? `${customerName(detail.customerId)} • ${callStatusMeta[detail.status].label}` : ""}
-        onClose={() => setDetail(undefined)}
+        onClose={() => setDetailId(undefined)}
         footer={
           <>
-            <Button variant="ghost" onClick={() => setDetail(undefined)}>
+            <Button variant="ghost" onClick={() => setDetailId(undefined)}>
               Đóng
             </Button>
             <Button variant="outline" onClick={() => dispatch({ type: "toast", message: "Đang phát lại bản ghi âm cuộc gọi", tone: "info" })}>
               <IconPlay size={15} /> Nghe bản ghi
             </Button>
-            <Button onClick={() => dispatch({ type: "toast", message: "Đã lưu ghi chú vào hành trình khách hàng", tone: "success" })}>
+            <Button
+              disabled={!detail || noteDraft.trim() === "" || noteDraft.trim() === detail.note}
+              onClick={() => {
+                if (!detail) return;
+                dispatch({ type: "saveCallNote", id: detail.id, note: noteDraft.trim() });
+              }}
+            >
               Lưu ghi chú
             </Button>
           </>
@@ -478,7 +510,12 @@ export function CallCenterPage() {
             </div>
             <div className="rounded-2xl bg-[#f8fafc] p-4">
               <p className="text-[12px] font-bold uppercase tracking-[0.06em] text-[#8492a0]">Ghi chú của nhân viên</p>
-              <p className="mt-2 text-[13px] leading-6 text-[#4a5763]">{detail.note}</p>
+              <textarea
+                className="mt-2 h-24 w-full rounded-xl border border-[#dfe6ec] bg-white px-3.5 py-2.5 text-[13px] leading-6 outline-none focus:border-[#0f8b98]"
+                value={noteDraft}
+                onChange={(event) => setNoteDraft(event.target.value)}
+                placeholder="Ghi lại nội dung trao đổi, nhu cầu và bước tiếp theo..."
+              />
             </div>
             <div className="rounded-2xl border border-[#edf1f5] p-4">
               <p className="text-[12px] font-bold uppercase tracking-[0.06em] text-[#8492a0]">Bản ghi âm</p>

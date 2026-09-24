@@ -27,6 +27,7 @@ import type {
   MessagingCampaign,
   TelesalesTask,
   Workflow,
+  WorkflowNode,
 } from "./types";
 
 export interface AppState {
@@ -49,9 +50,19 @@ export type Action =
   | { type: "resolveConversation"; id: string }
   | { type: "replyConversation"; id: string; body: string }
   | { type: "updateCall"; id: string; patch: Partial<CallRecord> }
+  | { type: "createCall"; customerId: string; queue: string }
+  | { type: "transferCall"; id: string; queue: string }
+  | { type: "saveCallNote"; id: string; note: string }
   | { type: "completeTask"; id: string; outcome: NonNullable<TelesalesTask["outcome"]> }
   | { type: "snoozeTask"; id: string }
+  | { type: "sendQuote"; taskId: string }
+  | { type: "scheduleDemo"; taskId: string }
+  | { type: "updateWorkflowNode"; workflowId: string; nodeId: string; patch: Partial<Pick<WorkflowNode, "title" | "detail">> }
+  | { type: "createWorkflow"; draft: { name: string; trigger: string } }
+  | { type: "runWorkflow"; id: string }
   | { type: "addLeadToTasks"; leadId: string; assignee: string }
+  | { type: "syncLeads" }
+  | { type: "mergeDuplicateLeads" }
   | {
       type: "createCustomer";
       draft: { name: string; company: string; phone: string; email: string; address: string; source: LeadSource; note: string };
@@ -160,6 +171,58 @@ export function reducer(state: AppState, action: Action): AppState {
       const calls = state.calls.map((item) => (item.id === action.id ? { ...item, ...action.patch } : item));
       return { ...state, calls };
     }
+    case "createCall": {
+      const customer = state.customers.find((item) => item.id === action.customerId);
+      if (!customer) return state;
+      // Cuộc gọi ra mới: đang đàm thoại, chưa có thời lượng, gắn người đang trực.
+      const call: CallRecord = {
+        id: `CALL-${Date.now()}`,
+        customerId: customer.id,
+        direction: "outbound",
+        status: "talking",
+        agent: state.currentUser.name,
+        queue: action.queue,
+        startedAt: new Date().toISOString(),
+        durationSec: 0,
+        waitSec: 0,
+        recording: true,
+        sentiment: "trung-tinh",
+        note: "Cuộc gọi ra do người dùng khởi tạo",
+      };
+      return nextToast({ ...state, calls: [call, ...state.calls] }, `Đã kết nối cuộc gọi ra tới ${customer.name}`, "info");
+    }
+    case "transferCall": {
+      const calls = state.calls.map((item) => (item.id === action.id ? { ...item, queue: action.queue } : item));
+      return nextToast({ ...state, calls }, `Đã chuyển cuộc gọi tới hàng đợi ${action.queue}`, "info");
+    }
+    case "saveCallNote": {
+      const target = state.calls.find((item) => item.id === action.id);
+      if (!target) return state;
+      const calls = state.calls.map((item) => (item.id === action.id ? { ...item, note: action.note } : item));
+      // Ghi chú cuộc gọi thuộc về hồ sơ khách hàng, nên cần vào hành trình để
+      // lần sau mở hồ sơ vẫn thấy, không chỉ nằm ở nhật ký tổng đài.
+      const customers = state.customers.map((customer) =>
+        customer.id !== target.customerId
+          ? customer
+          : {
+              ...customer,
+              lastContactAt: new Date().toISOString(),
+              timeline: [
+                {
+                  id: `ev-callnote-${target.id}-${Date.now()}`,
+                  channel: "call" as const,
+                  title: "Ghi chú cuộc gọi",
+                  detail: action.note,
+                  at: new Date().toISOString(),
+                  actor: state.currentUser.name,
+                  direction: "out" as const,
+                },
+                ...customer.timeline,
+              ],
+            },
+      );
+      return nextToast({ ...state, calls, customers }, "Đã lưu ghi chú vào hành trình khách hàng", "success");
+    }
     case "completeTask": {
       const telesalesTasks = state.telesalesTasks.map((item) =>
         item.id === action.id ? { ...item, done: true, outcome: action.outcome, lastResult: outcomeLabel(action.outcome) } : item,
@@ -173,6 +236,66 @@ export function reducer(state: AppState, action: Action): AppState {
           : item,
       );
       return nextToast({ ...state, telesalesTasks }, "Đã dời lịch gọi lại sau 2 giờ", "info");
+    }
+    case "sendQuote": {
+      const target = state.telesalesTasks.find((item) => item.id === action.taskId);
+      if (!target) return state;
+      const telesalesTasks = state.telesalesTasks.map((item) =>
+        item.id === action.taskId ? { ...item, lastResult: "Đã gửi báo giá qua Zalo" } : item,
+      );
+      // Gửi báo giá là một tương tác thật, phải vào hành trình khách hàng để ACRM
+      // nhìn thấy chứ không chỉ đổi nhãn trên task.
+      const now = new Date().toISOString();
+      const customers = state.customers.map((customer) =>
+        customer.id !== target.customerId
+          ? customer
+          : {
+              ...customer,
+              lastContactAt: now,
+              timeline: [
+                {
+                  id: `ev-quote-${target.id}-${Date.now()}`,
+                  channel: "zalo" as const,
+                  title: "Đã gửi báo giá",
+                  detail: "Báo giá được gửi qua Zalo OA sau cuộc gọi telesales.",
+                  at: now,
+                  actor: state.currentUser.name,
+                  direction: "out" as const,
+                },
+                ...customer.timeline,
+              ],
+            },
+      );
+      return nextToast({ ...state, telesalesTasks, customers }, "Đã gửi báo giá qua Zalo và ghi vào hành trình", "success");
+    }
+    case "scheduleDemo": {
+      const target = state.telesalesTasks.find((item) => item.id === action.taskId);
+      if (!target) return state;
+      const now = new Date().toISOString();
+      const telesalesTasks = state.telesalesTasks.map((item) =>
+        item.id === action.taskId ? { ...item, lastResult: "Đã đặt lịch hẹn demo" } : item,
+      );
+      const customers = state.customers.map((customer) =>
+        customer.id !== target.customerId
+          ? customer
+          : {
+              ...customer,
+              lastContactAt: now,
+              timeline: [
+                {
+                  id: `ev-demo-${target.id}-${Date.now()}`,
+                  channel: "call" as const,
+                  title: "Đã đặt lịch hẹn demo",
+                  detail: "Lịch hẹn demo được tạo từ cuộc gọi telesales.",
+                  at: now,
+                  actor: state.currentUser.name,
+                  direction: "out" as const,
+                },
+                ...customer.timeline,
+              ],
+            },
+      );
+      return nextToast({ ...state, telesalesTasks, customers }, "Đã tạo lịch hẹn demo cho khách hàng", "success");
     }
     case "addLeadToTasks": {
       const lead = state.leads.find((item) => item.id === action.leadId);
@@ -249,6 +372,21 @@ export function reducer(state: AppState, action: Action): AppState {
       };
       return nextToast({ ...state, customers: [customer, ...state.customers] }, `Đã tạo hồ sơ ${customer.code} cho ${customer.name}`, "success");
     }
+    case "syncLeads": {
+      // Đồng bộ chỉ đưa lead đang chờ phân loại vào tệp làm việc; lead đã chia
+      // hoặc đã loại không được kéo về lại.
+      const pending = state.leads.filter((lead) => lead.status === "moi").length;
+      const leads = state.leads.map((item) => (item.status === "moi" ? { ...item, status: "da-phan-loai" as const } : item));
+      return nextToast({ ...state, leads }, `Đã đồng bộ ${pending} lead mới và phân loại tự động`, "success");
+    }
+    case "mergeDuplicateLeads": {
+      const duplicates = state.leads.filter((lead) => lead.duplicate);
+      if (duplicates.length === 0) {
+        return nextToast(state, "Không phát hiện lead trùng dữ liệu", "info");
+      }
+      const leads = state.leads.map((item) => (item.duplicate ? { ...item, duplicate: false, status: "da-phan-loai" as const, note: `${item.note} (đã gộp hồ sơ trùng)` } : item));
+      return nextToast({ ...state, leads }, `Đã gộp ${duplicates.length} lead trùng vào hồ sơ gốc`, "success");
+    }
     case "discardLead": {
       const leads = state.leads.map((item) => (item.id === action.leadId ? { ...item, status: "loai" as const } : item));
       return nextToast({ ...state, leads }, "Đã loại lead khỏi tệp", "warn");
@@ -261,6 +399,56 @@ export function reducer(state: AppState, action: Action): AppState {
       );
       const target = workflows.find((item) => item.id === action.id);
       return nextToast({ ...state, workflows }, `Workflow "${target?.name}" đã ${target?.status === "dang-chay" ? "bật" : "tạm dừng"}`, "info");
+    }
+    case "updateWorkflowNode": {
+      const workflows = state.workflows.map((item) =>
+        item.id !== action.workflowId
+          ? item
+          : {
+              ...item,
+              updatedAt: new Date().toISOString(),
+              nodes: item.nodes.map((node) => (node.id === action.nodeId ? { ...node, ...action.patch } : node)),
+            },
+      );
+      return nextToast({ ...state, workflows }, "Đã lưu cấu hình bước trong workflow", "success");
+    }
+    case "createWorkflow": {
+      const { draft } = action;
+      const workflow: Workflow = {
+        id: `WF-${Date.now()}`,
+        name: draft.name,
+        status: "ban-nhap",
+        trigger: draft.trigger,
+        runsToday: 0,
+        successRate: 0,
+        owner: state.currentUser.name,
+        updatedAt: new Date().toISOString(),
+        nodes: [{ id: `wn-${Date.now()}`, type: "trigger", title: draft.trigger, detail: "Điểm bắt đầu của quy trình", x: 60, y: 40 }],
+        edges: [],
+        runs: [],
+      };
+      return nextToast({ ...state, workflows: [workflow, ...state.workflows] }, `Đã tạo workflow "${workflow.name}" ở dạng bản nháp`, "success");
+    }
+    case "runWorkflow": {
+      const target = state.workflows.find((item) => item.id === action.id);
+      if (!target) return state;
+      // Một lượt chạy thử chỉ chạy được khi workflow đang hoạt động; bản nháp và
+      // workflow tạm dừng phải được bật trước, nếu không sẽ báo lỗi thay vì giả vờ thành công.
+      if (target.status !== "dang-chay") {
+        return nextToast(state, `Chưa thể chạy "${target.name}": workflow đang ${target.status === "ban-nhap" ? "ở dạng bản nháp" : "tạm dừng"}`, "warn");
+      }
+      const lead = state.leads[0];
+      const run = {
+        id: `RUN-${target.id}-${Date.now()}`,
+        leadName: lead?.name ?? "Lead mẫu",
+        result: "Đã chạy thử với dữ liệu mẫu",
+        ok: true,
+        at: new Date().toISOString(),
+      };
+      const workflows = state.workflows.map((item) =>
+        item.id === action.id ? { ...item, runsToday: item.runsToday + 1, updatedAt: run.at, runs: [run, ...item.runs] } : item,
+      );
+      return nextToast({ ...state, workflows }, `Đã chạy thử workflow "${target.name}" với dữ liệu mẫu`, "success");
     }
     case "toggleCampaign": {
       const callbotCampaigns = state.callbotCampaigns.map((item) =>

@@ -492,6 +492,11 @@ export const workflows: Workflow[] = [
       { from: "n5", to: "n7" },
       { from: "n6", to: "n5" },
     ],
+    runs: [
+      { id: "RUN-WF01-1", leadName: "Nguyễn Hải Yến", result: "Đã chia lead và gửi tin chào mừng", ok: true, at: iso(between(15, 90)) },
+      { id: "RUN-WF01-2", leadName: "Trần Đình Trọng", result: "Bỏ qua do trùng dữ liệu", ok: false, at: iso(between(90, 240)) },
+      { id: "RUN-WF01-3", leadName: "Lê Ngọc Mai", result: "Đã chia lead và gửi tin chào mừng", ok: true, at: iso(between(240, 600)) },
+    ],
   },
   {
     id: "WF02",
@@ -514,6 +519,10 @@ export const workflows: Workflow[] = [
       { from: "m2", to: "m3" },
       { from: "m3", to: "m4" },
       { from: "m4", to: "m5", label: "Chưa" },
+    ],
+    runs: [
+      { id: "RUN-WF02-1", leadName: "Phạm Thu Hà", result: "Đã tạo việc chăm sóc cho sale", ok: true, at: iso(between(30, 200)) },
+      { id: "RUN-WF02-2", leadName: "Đỗ Quang Huy", result: "Đã tạo việc chăm sóc cho sale", ok: true, at: iso(between(200, 600)) },
     ],
   },
   {
@@ -538,6 +547,10 @@ export const workflows: Workflow[] = [
       { from: "p3", to: "p4", label: "Có" },
       { from: "p3", to: "p5", label: "Không" },
     ],
+    runs: [
+      { id: "RUN-WF03-1", leadName: "Hoàng Minh Tuấn", result: "Đã cập nhật trạng thái đơn", ok: true, at: iso(between(20, 300)) },
+      { id: "RUN-WF03-2", leadName: "Võ Thị Ngọc Hân", result: "Đã tạo task gọi lại cho telesales", ok: true, at: iso(between(300, 600)) },
+    ],
   },
   {
     id: "WF04",
@@ -557,6 +570,7 @@ export const workflows: Workflow[] = [
       { from: "q1", to: "q2" },
       { from: "q2", to: "q3" },
     ],
+    runs: [],
   },
 ];
 
