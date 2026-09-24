@@ -250,6 +250,11 @@ token qua thời gian phản hồi. Giao diện gửi token qua `authHeaders()` 
 `src/lib/voiceApi.ts`; người dùng dán token ở **Callbot → Đổi giọng** (lưu
 `localStorage`), hoặc đặt `VITE_VOICE_TOKEN`. Chưa đặt thì để mở (tiện cho dev nội bộ).
 
+**Giới hạn tần suất:** `app/ratelimit.py` là token bucket theo IP, TTS/STT hạn mức
+riêng (`CALLIO_RATE_LIMIT_TTS` mặc định 60, `CALLIO_RATE_LIMIT_STT` mặc định 20 mỗi
+`CALLIO_RATE_LIMIT_WINDOW` giây). Vượt hạn mức trả **429** kèm `Retry-After`. Đồng hồ
+tiêm được (`clock`) nên test kiểm soát thời gian, không cần `sleep`. Đặt 0 để tắt.
+
 **Streaming:** `/api/tts/stream` phát dần từng đoạn audio (edge-tts hỗ trợ sẵn). Đo
 thực tế với edge-tts: byte đầu tới sau ~0,16s so với ~0,42s khi đợi cả tệp. Giao diện
 hiện **chưa** dùng đường này vì `fetch` vẫn gom hết vào Blob trước khi phát — muốn ăn

@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import hmac
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 
 from .config import Settings, get_settings
 from .engines import Engines, build_engines
+from .ratelimit import TokenBucketLimiter
 from .voices import resolve_voice
 
 # Giới hạn độ dài văn bản đọc để một request không kéo dài vô hạn; 2000 ký tự
@@ -23,14 +24,23 @@ MAX_TTS_CHARS = 2000
 STT_LANGUAGE = "vi"
 
 
-def create_app(settings: Settings | None = None, engines: Engines | None = None) -> FastAPI:
-    """Dựng app. Tham số cho phép test tiêm cấu hình và engine giả."""
+def create_app(
+    settings: Settings | None = None,
+    engines: Engines | None = None,
+    tts_limiter: TokenBucketLimiter | None = None,
+    stt_limiter: TokenBucketLimiter | None = None,
+) -> FastAPI:
+    """Dựng app. Tham số cho phép test tiêm cấu hình, engine giả và bộ giới hạn."""
     settings = settings or get_settings()
     engines = engines or build_engines(settings)
+    tts_limiter = tts_limiter or TokenBucketLimiter(settings.rate_limit_tts, settings.rate_limit_window_seconds)
+    stt_limiter = stt_limiter or TokenBucketLimiter(settings.rate_limit_stt, settings.rate_limit_window_seconds)
 
-    app = FastAPI(title="Callio Voice API", version="1.1.0")
+    app = FastAPI(title="Callio Voice API", version="1.2.0")
     app.state.settings = settings
     app.state.engines = engines
+    app.state.tts_limiter = tts_limiter
+    app.state.stt_limiter = stt_limiter
 
     if settings.allowed_origins:
         app.add_middleware(
@@ -52,6 +62,29 @@ def create_app(settings: Settings | None = None, engines: Engines | None = None)
         if authorization is None or not hmac.compare_digest(authorization, expected):
             raise HTTPException(status_code=401, detail="Thiếu hoặc sai token xác thực")
 
+    def client_key(request: Request, scope: str) -> str:
+        """Khoá giới hạn theo IP + phạm vi, để TTS và STT có hạn mức riêng."""
+        host = request.client.host if request.client else "unknown"
+        return f"{scope}:{host}"
+
+    def make_limiter_dependency(scope: str, limiter: TokenBucketLimiter):
+        """Sinh dependency giới hạn tần suất cho một phạm vi."""
+
+        def dependency(request: Request) -> None:
+            key = client_key(request, scope)
+            if not limiter.allow(key):
+                wait = limiter.retry_after(key)
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Quá nhiều yêu cầu, thử lại sau {wait} giây",
+                    headers={"Retry-After": str(wait)},
+                )
+
+        return dependency
+
+    limit_tts = make_limiter_dependency("tts", tts_limiter)
+    limit_stt = make_limiter_dependency("stt", stt_limiter)
+
     @app.get("/api/health")
     async def health() -> dict[str, object]:
         return {
@@ -61,10 +94,20 @@ def create_app(settings: Settings | None = None, engines: Engines | None = None)
             "ttsProvider": settings.tts_provider,
             "sttProvider": settings.stt_provider,
             "authRequired": bool(settings.auth_token),
+            "rateLimit": {
+                "tts": settings.rate_limit_tts,
+                "stt": settings.rate_limit_stt,
+                "windowSeconds": settings.rate_limit_window_seconds,
+            },
         }
 
     @app.post("/api/tts")
-    async def tts(text: str = Form(...), voice: str | None = Form(None), _: None = Depends(require_token)) -> Response:
+    async def tts(
+        text: str = Form(...),
+        voice: str | None = Form(None),
+        _: None = Depends(require_token),
+        __: None = Depends(limit_tts),
+    ) -> Response:
         clean = text.strip()
         if clean == "":
             raise HTTPException(status_code=400, detail="Văn bản đọc đang trống")
@@ -77,7 +120,12 @@ def create_app(settings: Settings | None = None, engines: Engines | None = None)
         return Response(content=audio, media_type="audio/mpeg")
 
     @app.post("/api/tts/stream")
-    async def tts_stream(text: str = Form(...), voice: str | None = Form(None), _: None = Depends(require_token)) -> StreamingResponse:
+    async def tts_stream(
+        text: str = Form(...),
+        voice: str | None = Form(None),
+        _: None = Depends(require_token),
+        __: None = Depends(limit_tts),
+    ) -> StreamingResponse:
         """Như /api/tts nhưng phát dần từng đoạn audio, giảm thời gian chờ nghe.
 
         Lỗi xảy ra *sau* khi đã gửi header không thể đổi thành mã HTTP lỗi nữa, nên
@@ -103,6 +151,7 @@ def create_app(settings: Settings | None = None, engines: Engines | None = None)
         audio: UploadFile = File(...),
         language: str = Form(STT_LANGUAGE),
         _: None = Depends(require_token),
+        __: None = Depends(limit_stt),
     ) -> dict[str, str]:
         data = await audio.read()
         if not data:

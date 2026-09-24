@@ -13,6 +13,7 @@ from app.config import Settings
 from app.engines import Engines, build_engines
 from app.main import MAX_TTS_CHARS, create_app
 from app.providers import OpenAICompatibleStt, OpenAICompatibleTts
+from app.ratelimit import TokenBucketLimiter
 from app.voices import VOICE_FEMALE, VOICE_MALE, resolve_voice
 
 
@@ -335,6 +336,139 @@ class TtsStreamTests(unittest.TestCase):
         response = client.post("/api/tts/stream", data={"text": "Xin chào"}, headers={"Authorization": "Bearer s3cret"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, b"PART1PART2")
+
+
+class FakeClock:
+    """Đồng hồ điều khiển được để test giới hạn tần suất mà không cần sleep."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class TokenBucketLimiterTests(unittest.TestCase):
+    def test_allows_up_to_capacity(self):
+        clock = FakeClock()
+        limiter = TokenBucketLimiter(capacity=3, window_seconds=60, clock=clock)
+
+        results = [limiter.allow("a") for _ in range(4)]
+        self.assertEqual(results, [True, True, True, False], "request thứ tư vượt hạn mức")
+
+    def test_disabled_when_capacity_zero(self):
+        limiter = TokenBucketLimiter(capacity=0, window_seconds=60, clock=FakeClock())
+        self.assertFalse(limiter.enabled)
+        self.assertTrue(all(limiter.allow("a") for _ in range(100)))
+
+    def test_separate_keys_have_separate_buckets(self):
+        limiter = TokenBucketLimiter(capacity=1, window_seconds=60, clock=FakeClock())
+        self.assertTrue(limiter.allow("a"))
+        self.assertFalse(limiter.allow("a"))
+        self.assertTrue(limiter.allow("b"), "khoá khác phải có hạn mức riêng")
+
+    def test_refills_over_time(self):
+        clock = FakeClock()
+        limiter = TokenBucketLimiter(capacity=2, window_seconds=60, clock=clock)
+        self.assertTrue(limiter.allow("a"))
+        self.assertTrue(limiter.allow("a"))
+        self.assertFalse(limiter.allow("a"), "đã cạn token")
+
+        # Nửa cửa sổ -> nạp lại 1 token.
+        clock.advance(30)
+        self.assertTrue(limiter.allow("a"))
+        self.assertFalse(limiter.allow("a"), "chỉ đủ cho một request")
+
+    def test_never_exceeds_capacity_after_long_idle(self):
+        clock = FakeClock()
+        limiter = TokenBucketLimiter(capacity=2, window_seconds=60, clock=clock)
+        limiter.allow("a")
+        clock.advance(10_000)
+        # Dù chờ rất lâu, vẫn không vượt quá capacity.
+        results = [limiter.allow("a") for _ in range(3)]
+        self.assertEqual(results, [True, True, False])
+
+    def test_retry_after_reports_wait(self):
+        clock = FakeClock()
+        limiter = TokenBucketLimiter(capacity=1, window_seconds=60, clock=clock)
+        limiter.allow("a")
+        self.assertFalse(limiter.allow("a"))
+        # Cần 1 token, nạp 1 token/60s -> chờ khoảng 60 giây.
+        self.assertGreaterEqual(limiter.retry_after("a"), 1)
+        self.assertLessEqual(limiter.retry_after("a"), 60)
+
+    def test_retry_after_is_zero_when_available(self):
+        limiter = TokenBucketLimiter(capacity=5, window_seconds=60, clock=FakeClock())
+        self.assertEqual(limiter.retry_after("chua-dung"), 0)
+
+    def test_cost_can_be_greater_than_one(self):
+        limiter = TokenBucketLimiter(capacity=3, window_seconds=60, clock=FakeClock())
+        self.assertTrue(limiter.allow("a", cost=3))
+        self.assertFalse(limiter.allow("a", cost=1))
+
+    def test_reset_clears_buckets(self):
+        limiter = TokenBucketLimiter(capacity=1, window_seconds=60, clock=FakeClock())
+        limiter.allow("a")
+        self.assertFalse(limiter.allow("a"))
+        limiter.reset()
+        self.assertTrue(limiter.allow("a"))
+
+
+class RateLimitEndpointTests(unittest.TestCase):
+    def build(self, **settings_kwargs):
+        settings = Settings(**settings_kwargs)
+        engines = Engines(tts=FakeTts(), stt=FakeStt())
+        clock = FakeClock()
+        tts_limiter = TokenBucketLimiter(settings.rate_limit_tts, settings.rate_limit_window_seconds, clock)
+        stt_limiter = TokenBucketLimiter(settings.rate_limit_stt, settings.rate_limit_window_seconds, clock)
+        app = create_app(settings=settings, engines=engines, tts_limiter=tts_limiter, stt_limiter=stt_limiter)
+        return TestClient(app), clock
+
+    def test_tts_returns_429_with_retry_after_when_exhausted(self):
+        client, _ = self.build(rate_limit_tts=2)
+        self.assertEqual(client.post("/api/tts", data={"text": "a"}).status_code, 200)
+        self.assertEqual(client.post("/api/tts", data={"text": "a"}).status_code, 200)
+
+        response = client.post("/api/tts", data={"text": "a"})
+        self.assertEqual(response.status_code, 429)
+        self.assertIn("Retry-After", response.headers)
+        self.assertIn("thử lại sau", response.json()["detail"])
+
+    def test_tts_and_stt_have_separate_limits(self):
+        client, _ = self.build(rate_limit_tts=1, rate_limit_stt=5)
+        self.assertEqual(client.post("/api/tts", data={"text": "a"}).status_code, 200)
+        self.assertEqual(client.post("/api/tts", data={"text": "a"}).status_code, 429)
+        # Hạn mức TTS cạn không được ảnh hưởng STT.
+        response = client.post("/api/stt", files={"audio": ("a.mp3", b"AUDIO", "audio/mpeg")})
+        self.assertEqual(response.status_code, 200)
+
+    def test_stt_returns_429_when_exhausted(self):
+        client, _ = self.build(rate_limit_stt=1)
+        self.assertEqual(client.post("/api/stt", files={"audio": ("a.mp3", b"AUDIO", "audio/mpeg")}).status_code, 200)
+        self.assertEqual(client.post("/api/stt", files={"audio": ("a.mp3", b"AUDIO", "audio/mpeg")}).status_code, 429)
+
+    def test_limit_refills_after_window(self):
+        client, clock = self.build(rate_limit_tts=1, rate_limit_window_seconds=60)
+        self.assertEqual(client.post("/api/tts", data={"text": "a"}).status_code, 200)
+        self.assertEqual(client.post("/api/tts", data={"text": "a"}).status_code, 429)
+
+        clock.advance(61)
+        self.assertEqual(client.post("/api/tts", data={"text": "a"}).status_code, 200)
+
+    def test_stream_endpoint_shares_tts_limit(self):
+        client, _ = self.build(rate_limit_tts=1)
+        self.assertEqual(client.post("/api/tts/stream", data={"text": "a"}).status_code, 200)
+        # Dùng chung hạn mức nên /api/tts bị chặn luôn.
+        self.assertEqual(client.post("/api/tts", data={"text": "a"}).status_code, 429)
+
+    def test_health_reports_rate_limit(self):
+        client, _ = self.build(rate_limit_tts=7, rate_limit_stt=3)
+        body = client.get("/api/health").json()
+        self.assertEqual(body["rateLimit"]["tts"], 7)
+        self.assertEqual(body["rateLimit"]["stt"], 3)
 
 
 if __name__ == "__main__":

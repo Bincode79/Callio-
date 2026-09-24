@@ -67,6 +67,17 @@ export async function probeVoiceApi(timeoutMs = 1500): Promise<boolean> {
   }
 }
 
+/**
+ * Chuyển mã lỗi HTTP của backend thành thông báo tiếng Việt dễ hiểu. Tách riêng để
+ * test được và để mọi lời gọi dùng cùng một cách diễn đạt.
+ */
+export function voiceApiErrorMessage(status: number, kind: "TTS" | "STT"): string {
+  if (status === 401) return "Máy chủ giọng đọc yêu cầu token";
+  if (status === 429) return "Máy chủ giọng đọc đang bị gọi quá nhanh, thử lại sau ít giây";
+  if (status === 413) return "Tệp ghi âm quá lớn";
+  return `${kind} thất bại (${status})`;
+}
+
 /** Đọc văn bản thành audio MP3 qua backend. */
 export async function synthesizeSpeech(text: string, voiceLabel: string, signal?: AbortSignal): Promise<Blob> {
   const form = new FormData();
@@ -79,7 +90,7 @@ export async function synthesizeSpeech(text: string, voiceLabel: string, signal?
     signal,
   });
   if (!response.ok) {
-    throw new Error(response.status === 401 ? "Máy chủ giọng đọc yêu cầu token" : `TTS thất bại (${response.status})`);
+    throw new Error(voiceApiErrorMessage(response.status, "TTS"));
   }
   return response.blob();
 }
@@ -91,7 +102,7 @@ export async function transcribeSpeech(audio: Blob, signal?: AbortSignal): Promi
   form.append("audio", audio, "recording.webm");
   const response = await fetch(`${voiceApiBase()}/api/stt`, { method: "POST", body: form, headers: authHeaders(), signal });
   if (!response.ok) {
-    throw new Error(response.status === 401 ? "Máy chủ giọng đọc yêu cầu token" : `STT thất bại (${response.status})`);
+    throw new Error(voiceApiErrorMessage(response.status, "STT"));
   }
   const body = (await response.json()) as { text?: unknown };
   return typeof body.text === "string" ? body.text : "";

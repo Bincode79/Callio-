@@ -40,6 +40,19 @@ nên chỉ cần chạy `npm run dev` song song là giao diện tự nhận back
 | `CALLIO_STT_BASE_URL` | (trống) | Bắt buộc khi `CALLIO_STT_PROVIDER=openai`. |
 | `CALLIO_STT_MODEL` | `whisper-1` | Tên model gửi cho nhà cung cấp STT. |
 | `CALLIO_PROVIDER_API_KEY` | (trống) | Bearer key gửi cho nhà cung cấp OpenAI-compatible (nếu cần). |
+| `CALLIO_RATE_LIMIT_TTS` | `60` | Số request TTS mỗi cửa sổ (0 = tắt). |
+| `CALLIO_RATE_LIMIT_STT` | `20` | Số request STT mỗi cửa sổ (0 = tắt) — thấp hơn vì tốn CPU hơn. |
+| `CALLIO_RATE_LIMIT_WINDOW` | `60` | Độ dài cửa sổ giới hạn, tính bằng giây. |
+
+## Giới hạn tần suất
+
+Thuật toán token bucket theo IP + phạm vi (TTS/STT riêng). `capacity=30, window=60`
+nghĩa là trung bình 30 request/phút nhưng vẫn cho bùng nổ ngắn, phù hợp thao tác người
+dùng. Vượt hạn mức trả **429** kèm header `Retry-After` (giây) và thông báo tiếng Việt.
+
+Đặt `CALLIO_RATE_LIMIT_TTS=0` hoặc `CALLIO_RATE_LIMIT_STT=0` để tắt hẳn. `/api/health`
+báo lại hạn mức đang áp dụng.
+
 
 ## Đổi engine sang mã nguồn mở khác
 
@@ -83,9 +96,9 @@ giá trị được lưu trong trình duyệt (`localStorage`) và gửi kèm m�
 - **faster-whisper chạy hoàn toàn cục bộ** (mã nguồn mở, không gọi dịch vụ ngoài). Lần
   chạy đầu tải model; `small` cho chất lượng tiếng Việt tốt hơn `tiny`/`base` rõ rệt
   nhưng chậm hơn trên CPU.
-- Giới hạn hiện tại: chưa có hàng đợi, chưa giới hạn tần suất. Khi đặt
-  `CALLIO_AUTH_TOKEN` thì đã có xác thực bearer token; ngoài ra vẫn nên chạy sau mạng
-  nội bộ hoặc sau reverse proxy.
+- Giới hạn hiện tại: chưa có hàng đợi. Đã có xác thực bearer token (`CALLIO_AUTH_TOKEN`)
+  và **giới hạn tần suất** theo IP (token bucket, TTS/STT riêng); ngoài ra vẫn nên chạy
+  sau mạng nội bộ hoặc sau reverse proxy.
 
 ## Test
 

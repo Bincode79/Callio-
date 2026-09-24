@@ -44,6 +44,11 @@ class Settings:
     provider_api_key: str = ""
     # Nếu đặt, mọi request /api/tts và /api/stt phải kèm `Authorization: Bearer <token>`.
     auth_token: str = ""
+    # Giới hạn tần suất: số request mỗi cửa sổ (0 = tắt). TTS và STT tách riêng vì
+    # STT tốn CPU hơn nhiều.
+    rate_limit_tts: int = 60
+    rate_limit_stt: int = 20
+    rate_limit_window_seconds: float = 60.0
 
 
 def _split_origins(raw: str) -> tuple[str, ...]:
@@ -69,4 +74,7 @@ def get_settings() -> Settings:
         stt_model=os.getenv("CALLIO_STT_MODEL", "whisper-1"),
         provider_api_key=os.getenv("CALLIO_PROVIDER_API_KEY", ""),
         auth_token=os.getenv("CALLIO_AUTH_TOKEN", ""),
+        rate_limit_tts=int(os.getenv("CALLIO_RATE_LIMIT_TTS", "60")),
+        rate_limit_stt=int(os.getenv("CALLIO_RATE_LIMIT_STT", "20")),
+        rate_limit_window_seconds=float(os.getenv("CALLIO_RATE_LIMIT_WINDOW", "60")),
     )
