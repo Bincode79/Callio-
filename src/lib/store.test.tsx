@@ -415,6 +415,130 @@ describe("việc telesales", () => {
   });
 });
 
+describe("hồ sơ khách hàng", () => {
+  const draft = {
+    name: "Đặng Văn Mới",
+    company: "Công ty TNHH Thử Nghiệm",
+    phone: "0988111222",
+    email: "moi@thunghiem.vn",
+    address: "Đà Nẵng",
+    source: "website" as const,
+    note: "Cần tư vấn gói tổng đài.",
+  };
+
+  it("tạo hồ sơ mới với mã riêng và gắn vào hành trình", () => {
+    const state = freshState();
+    const before = state.customers.length;
+
+    const next = reducer(state, { type: "createCustomer", draft });
+    const created = next.customers[0];
+
+    assert.equal(next.customers.length, before + 1);
+    assert.equal(created.name, draft.name);
+    assert.equal(created.phone, draft.phone);
+    assert.equal(created.source, "website");
+    assert.equal(created.status, "lead");
+    assert.equal(created.owner, state.currentUser.name, "hồ sơ tạo thủ công thuộc về người đang đăng nhập");
+    assert.ok(created.timeline.some((event) => event.title === "Tạo hồ sơ khách hàng"), "phải ghi lại sự kiện tạo hồ sơ");
+    assert.equal(created.totalValue, 0, "hồ sơ mới chưa có giá trị pipeline");
+  });
+
+  it("không cấp mã trùng với khách hàng sẵn có", () => {
+    const state = freshState();
+    const existingCodes = new Set(state.customers.map((customer) => customer.code));
+
+    const next = reducer(state, { type: "createCustomer", draft });
+    assert.equal(existingCodes.has(next.customers[0].code), false, "mã khách hàng phải là duy nhất");
+  });
+});
+
+describe("chiến dịch nhắn tin", () => {
+  const draft = {
+    name: "Chăm sóc khách hàng tháng 10",
+    channel: "zalo" as const,
+    brandname: "Callio OA",
+    audience: "Khách hàng đang giao dịch",
+    body: "Dạ Callio xin chào anh/chị {ten_khach}.",
+    scheduledAt: "2026-10-01T09:00",
+  };
+
+  it("tạo chiến dịch ở dạng nháp thì chưa gửi tin nào", () => {
+    const state = freshState();
+    const before = state.messagingCampaigns.length;
+
+    const next = reducer(state, { type: "createMessagingCampaign", draft: { ...draft, start: false } });
+    const created = next.messagingCampaigns[0];
+
+    assert.equal(next.messagingCampaigns.length, before + 1);
+    assert.equal(created.name, draft.name);
+    assert.equal(created.channel, "zalo");
+    assert.equal(created.brandname, "Callio OA");
+    assert.equal(created.status, "nhap", "lưu nháp thì không chạy");
+    assert.equal(created.sent, 0, "chiến dịch mới chưa gửi tin nào");
+    assert.deepEqual(next.messagingCampaigns[0].opened, 0);
+  });
+
+  it("lên lịch gửi thì chiến dịch chạy ngay", () => {
+    const state = freshState();
+
+    const next = reducer(state, { type: "createMessagingCampaign", draft: { ...draft, start: true } });
+    assert.equal(next.messagingCampaigns[0].status, "dang-chay");
+  });
+
+  it("lưu nội dung soạn tay thành mẫu tin dùng lại", () => {
+    const state = freshState();
+    const templatesBefore = state.templates.length;
+
+    const next = reducer(state, { type: "createMessagingCampaign", draft: { ...draft, start: false } });
+    const created = next.messagingCampaigns[0];
+
+    assert.equal(next.templates.length, templatesBefore + 1, "nội dung soạn tay phải thành mẫu tin");
+    assert.equal(next.templates[0].body, draft.body);
+    assert.equal(created.templateId, next.templates[0].id, "chiến dịch phải trỏ tới mẫu vừa tạo");
+  });
+
+  it("nhân bản chiến dịch tạo bản nháp không mang theo số liệu cũ", () => {
+    const state = freshState();
+    const source = state.messagingCampaigns.find((item) => item.sent > 0);
+    assert.ok(source, "cần một chiến dịch đã gửi tin để kiểm tra");
+    const before = state.messagingCampaigns.length;
+
+    const next = reducer(state, { type: "duplicateMessagingCampaign", id: source.id });
+    const copy = next.messagingCampaigns[0];
+
+    assert.equal(next.messagingCampaigns.length, before + 1);
+    assert.equal(copy.status, "nhap");
+    assert.equal(copy.sent, 0, "bản sao chưa gửi");
+    assert.equal(copy.delivered, 0);
+    assert.equal(copy.replied, 0);
+    assert.equal(copy.audience, source.audience, "giữ nguyên tệp khách hàng");
+    assert.match(copy.name, /bản sao/);
+  });
+
+  it("không làm gì khi nhân bản chiến dịch không tồn tại", () => {
+    const state = freshState();
+    const next = reducer(state, { type: "duplicateMessagingCampaign", id: "MC-KHONG-CO" });
+    assert.equal(next, state);
+  });
+
+  it("sửa mẫu tin thì chỉ đụng mẫu được chọn", () => {
+    const state = freshState();
+    const target = state.templates[0];
+    const othersBefore = state.templates.slice(1);
+
+    const next = reducer(state, {
+      type: "updateTemplate",
+      id: target.id,
+      patch: { body: "Nội dung đã sửa", category: "marketing" },
+    });
+    const updated = next.templates.find((item) => item.id === target.id);
+
+    assert.equal(updated?.body, "Nội dung đã sửa");
+    assert.equal(updated?.category, "marketing");
+    assert.deepEqual(next.templates.slice(1), othersBefore);
+  });
+});
+
 describe("thông báo", () => {
   it("chỉ giữ tối đa ba thông báo gần nhất", () => {
     let state = freshState();
@@ -444,6 +568,14 @@ describe("tính bất biến của state", () => {
     reducer(state, { type: "toggleCampaign", id: "CB01" });
     reducer(state, { type: "duplicateCampaign", id: "CB01" });
     reducer(state, { type: "discardLead", leadId: leads[0].id });
+    reducer(state, {
+      type: "createMessagingCampaign",
+      draft: { name: "Kiểm tra bất biến", channel: "sms", brandname: "CALLIO", audience: "Tệp", body: "Nội dung", scheduledAt: "2026-10-01T09:00", start: true },
+    });
+    reducer(state, {
+      type: "createCustomer",
+      draft: { name: "Bất biến", company: "Cty", phone: "0900000000", email: "a@b.vn", address: "HN", source: "website", note: "x" },
+    });
 
     assert.deepEqual(state, snapshot, "reducer phải trả về state mới, không sửa state cũ");
   });

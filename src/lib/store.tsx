@@ -18,9 +18,11 @@ import type {
   CallbotResult,
   CallbotRules,
   CallbotScriptStep,
+  Channel,
   Conversation,
   Customer,
   Lead,
+  LeadSource,
   MessageTemplate,
   MessagingCampaign,
   TelesalesTask,
@@ -50,6 +52,10 @@ export type Action =
   | { type: "completeTask"; id: string; outcome: NonNullable<TelesalesTask["outcome"]> }
   | { type: "snoozeTask"; id: string }
   | { type: "addLeadToTasks"; leadId: string; assignee: string }
+  | {
+      type: "createCustomer";
+      draft: { name: string; company: string; phone: string; email: string; address: string; source: LeadSource; note: string };
+    }
   | { type: "discardLead"; leadId: string }
   | { type: "toggleWorkflow"; id: string }
   | { type: "toggleCampaign"; id: string }
@@ -64,6 +70,21 @@ export type Action =
   | { type: "updateCampaignConfig"; id: string; patch: Partial<Pick<CallbotCampaign, "windowStart" | "windowEnd" | "concurrency" | "retry" | "total">> }
   | { type: "toggleCampaignRule"; id: string; rule: keyof CallbotRules }
   | { type: "toggleMessagingCampaign"; id: string }
+  | {
+      type: "createMessagingCampaign";
+      draft: {
+        name: string;
+        channel: Channel;
+        brandname: string;
+        audience: string;
+        body: string;
+        scheduledAt: string;
+        /** Gửi ngay (đang chạy) hay chỉ lưu ở dạng bản nháp. */
+        start: boolean;
+      };
+    }
+  | { type: "duplicateMessagingCampaign"; id: string }
+  | { type: "updateTemplate"; id: string; patch: Partial<Pick<MessageTemplate, "name" | "body" | "category">> }
   | { type: "toast"; message: string; tone?: "success" | "info" | "warn" }
   | { type: "dismissToast"; id: number };
 
@@ -191,6 +212,42 @@ export function reducer(state: AppState, action: Action): AppState {
           : `Đã tạo hồ sơ ${customer.code} từ lead và chia cho ${action.assignee}`,
         "success",
       );
+    }
+    case "createCustomer": {
+      const { draft } = action;
+      const now = new Date().toISOString();
+      const customer: Customer = {
+        id: `KH-LOCAL-${Date.now()}`,
+        code: nextCustomerCode(state.customers),
+        name: draft.name,
+        company: draft.company || "Chưa cập nhật",
+        phone: draft.phone,
+        email: draft.email,
+        address: draft.address || "Chưa cập nhật",
+        status: "lead",
+        source: draft.source,
+        owner: state.currentUser.name,
+        tags: ["Tạo thủ công"],
+        createdAt: now,
+        lastContactAt: now,
+        score: 50,
+        totalValue: 0,
+        dealCount: 0,
+        note: draft.note || "Chưa có ghi chú.",
+        timeline: [
+          {
+            id: `ev-${Date.now()}`,
+            channel: "note",
+            title: "Tạo hồ sơ khách hàng",
+            detail: `Hồ sơ được tạo thủ công bởi ${state.currentUser.name}.`,
+            at: now,
+            actor: state.currentUser.name,
+            direction: "out",
+          },
+        ],
+        deals: [],
+      };
+      return nextToast({ ...state, customers: [customer, ...state.customers] }, `Đã tạo hồ sơ ${customer.code} cho ${customer.name}`, "success");
     }
     case "discardLead": {
       const leads = state.leads.map((item) => (item.id === action.leadId ? { ...item, status: "loai" as const } : item));
@@ -406,6 +463,66 @@ export function reducer(state: AppState, action: Action): AppState {
           : item,
       );
       return nextToast({ ...state, messagingCampaigns }, "Đã cập nhật trạng thái chiến dịch nhắn tin", "info");
+    }
+    case "createMessagingCampaign": {
+      const { draft } = action;
+      const campaign: MessagingCampaign = {
+        id: `MC-${Date.now()}`,
+        name: draft.name,
+        channel: draft.channel,
+        status: draft.start ? "dang-chay" : "nhap",
+        audience: draft.audience,
+        templateId: "",
+        sent: 0,
+        delivered: 0,
+        opened: 0,
+        replied: 0,
+        failed: 0,
+        scheduledAt: draft.scheduledAt,
+        brandname: draft.brandname,
+      };
+      // Nội dung soạn tay được lưu thành mẫu tin dùng lại, gắn vào chính chiến
+      // dịch vừa tạo để thư viện mẫu phản ánh đúng thứ đã gửi.
+      const template: MessageTemplate = {
+        id: `T-${Date.now()}`,
+        name: `${draft.name} - nội dung`,
+        channel: draft.channel,
+        category: "cham-soc",
+        body: draft.body,
+        usageCount: 0,
+        updatedAt: new Date().toISOString(),
+      };
+      campaign.templateId = template.id;
+      return nextToast(
+        {
+          ...state,
+          messagingCampaigns: [campaign, ...state.messagingCampaigns],
+          templates: [template, ...state.templates],
+        },
+        draft.start ? `Đã bắt đầu gửi chiến dịch "${campaign.name}"` : `Đã lưu nháp chiến dịch "${campaign.name}"`,
+        draft.start ? "success" : "info",
+      );
+    }
+    case "duplicateMessagingCampaign": {
+      const source = state.messagingCampaigns.find((item) => item.id === action.id);
+      if (!source) return state;
+      const copy: MessagingCampaign = {
+        ...source,
+        id: `MC-${Date.now()}`,
+        name: `${source.name} (bản sao)`,
+        status: "nhap",
+        // Bản sao chưa gửi, không mang theo số liệu của bản gốc.
+        sent: 0,
+        delivered: 0,
+        opened: 0,
+        replied: 0,
+        failed: 0,
+      };
+      return nextToast({ ...state, messagingCampaigns: [copy, ...state.messagingCampaigns] }, `Đã nhân bản thành "${copy.name}"`, "success");
+    }
+    case "updateTemplate": {
+      const templates = state.templates.map((item) => (item.id === action.id ? { ...item, ...action.patch, updatedAt: new Date().toISOString() } : item));
+      return nextToast({ ...state, templates }, "Đã cập nhật mẫu tin", "success");
     }
     case "toast":
       return nextToast(state, action.message, action.tone ?? "info");

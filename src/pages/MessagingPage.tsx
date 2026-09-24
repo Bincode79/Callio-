@@ -28,9 +28,15 @@ import {
   Tabs,
 } from "../components/ui";
 import { IconCheck, IconClock, IconMail, IconPlus, IconSend, IconSparkle, IconTag, IconTarget } from "../components/icons";
-import type { Channel, MessagingCampaign } from "../lib/types";
+import type { Channel, MessageTemplate, MessagingCampaign } from "../lib/types";
 
 const BRANDNAMES = ["CALLIO", "Callio OA", "support@callio.vn", "Callio Page"];
+
+/** Giá trị cho `<input type="datetime-local">`: giờ địa phương dạng `YYYY-MM-DDTHH:mm`. */
+function toLocalInputValue(time: number): string {
+  const date = new Date(time - new Date().getTimezoneOffset() * 60000);
+  return date.toISOString().slice(0, 16);
+}
 
 export function MessagingPage() {
   const { state, dispatch } = useApp();
@@ -39,8 +45,21 @@ export function MessagingPage() {
   const [channel, setChannel] = useState("all");
   const [status, setStatus] = useState("all");
   const [composeOpen, setComposeOpen] = useState(false);
-  const [detail, setDetail] = useState<MessagingCampaign | undefined>();
-  const [preview, setPreview] = useState("Dạ Callio xin chào anh/chị {ten_khach}. Em là {ten_sale}, chuyên viên tư vấn của anh/chị. Anh/chị cho em xin 5 phút trao đổi về nhu cầu quản lý khách hàng nhé!");
+  const [detailId, setDetailId] = useState<string>();
+  const [editingTemplate, setEditingTemplate] = useState<string>();
+  const [templateDraft, setTemplateDraft] = useState<{ name: string; body: string; category: MessageTemplate["category"] }>({
+    name: "",
+    body: "",
+    category: "cham-soc",
+  });
+  const [draft, setDraft] = useState({
+    name: "",
+    channel: "zalo" as Channel,
+    brandname: BRANDNAMES[0],
+    audience: "Khách hàng đang giao dịch",
+    body: "Dạ Callio xin chào anh/chị {ten_khach}. Em là {ten_sale}, chuyên viên tư vấn của anh/chị. Anh/chị cho em xin 5 phút trao đổi về nhu cầu quản lý khách hàng nhé!",
+    scheduledAt: toLocalInputValue(Date.now()),
+  });
 
   const filtered = useMemo(
     () =>
@@ -53,6 +72,10 @@ export function MessagingPage() {
       }),
     [state.messagingCampaigns, query, channel, status],
   );
+
+  // Chi tiết đọc thẳng từ state theo mã để trạng thái và số liệu luôn khớp sau
+  // khi tạm dừng hoặc nhân bản, thay vì giữ một bản sao đã cũ.
+  const detail = state.messagingCampaigns.find((campaign) => campaign.id === detailId);
 
   const totals = state.messagingCampaigns.reduce(
     (acc, campaign) => ({
@@ -173,7 +196,7 @@ export function MessagingPage() {
             <DataTable
               rowKey={(row) => row.id}
               rows={filtered}
-              onRowClick={(row) => setDetail(row)}
+              onRowClick={(row) => setDetailId(row.id)}
               emptyLabel="Không có chiến dịch phù hợp"
               columns={[
                 {
@@ -234,10 +257,24 @@ export function MessagingPage() {
                   <span className="text-[11.5px] font-black text-[#0f8b98]">{formatNumber(template.usageCount)} lượt dùng</span>
                 </div>
                 <div className="mt-3 flex gap-2">
-                  <Button size="sm" variant="outline" onClick={() => dispatch({ type: "toast", message: `Đã nạp mẫu tin "${template.name}" vào trình soạn`, tone: "success" })}>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setDraft((current) => ({ ...current, body: template.body, channel: template.channel }));
+                      setComposeOpen(true);
+                    }}
+                  >
                     Dùng mẫu này
                   </Button>
-                  <Button size="sm" variant="ghost" onClick={() => dispatch({ type: "toast", message: "Đã mở trình chỉnh sửa mẫu tin", tone: "info" })}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      setEditingTemplate(template.id);
+                      setTemplateDraft({ name: template.name, body: template.body, category: template.category });
+                    }}
+                  >
                     Chỉnh sửa
                   </Button>
                 </div>
@@ -291,14 +328,19 @@ export function MessagingPage() {
             </Button>
             <Button
               variant="outline"
-              onClick={() => dispatch({ type: "toast", message: "Đã lưu chiến dịch ở dạng bản nháp", tone: "info" })}
+              disabled={draft.name.trim() === ""}
+              onClick={() => {
+                setComposeOpen(false);
+                dispatch({ type: "createMessagingCampaign", draft: { ...draft, name: draft.name.trim(), start: false } });
+              }}
             >
               Lưu nháp
             </Button>
             <Button
+              disabled={draft.name.trim() === ""}
               onClick={() => {
                 setComposeOpen(false);
-                dispatch({ type: "toast", message: "Đã lên lịch gửi chiến dịch tới tệp khách hàng đã chọn", tone: "success" });
+                dispatch({ type: "createMessagingCampaign", draft: { ...draft, name: draft.name.trim(), start: true } });
               }}
             >
               <IconSend size={15} /> Lên lịch gửi
@@ -310,28 +352,49 @@ export function MessagingPage() {
           <div className="space-y-4">
             <label className="block">
               <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Tên chiến dịch</span>
-              <input className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]" placeholder="Chăm sóc khách hàng tháng 10" />
+              <input
+                className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]"
+                placeholder="Chăm sóc khách hàng tháng 10"
+                value={draft.name}
+                onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
+              />
             </label>
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="block">
                 <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Kênh gửi</span>
-                <select className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]">
+                <select
+                  className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]"
+                  value={draft.channel}
+                  onChange={(event) => setDraft((current) => ({ ...current, channel: event.target.value as Channel }))}
+                >
                   {(["zalo", "sms", "email", "facebook"] as Channel[]).map((key) => (
-                    <option key={key}>{channelMeta[key].label}</option>
+                    <option key={key} value={key}>
+                      {channelMeta[key].label}
+                    </option>
                   ))}
                 </select>
               </label>
               <label className="block">
                 <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Brandname / Đầu gửi</span>
-                <select className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]">
+                <select
+                  className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]"
+                  value={draft.brandname}
+                  onChange={(event) => setDraft((current) => ({ ...current, brandname: event.target.value }))}
+                >
                   {BRANDNAMES.map((name) => (
-                    <option key={name}>{name}</option>
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
                   ))}
                 </select>
               </label>
               <label className="block">
                 <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Tệp khách hàng</span>
-                <select className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]">
+                <select
+                  className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]"
+                  value={draft.audience}
+                  onChange={(event) => setDraft((current) => ({ ...current, audience: event.target.value }))}
+                >
                   <option>Khách hàng đang giao dịch</option>
                   <option>Lead tiềm năng chưa chốt</option>
                   <option>Khách đến hạn chăm sóc</option>
@@ -340,18 +403,23 @@ export function MessagingPage() {
               </label>
               <label className="block">
                 <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Thời điểm gửi</span>
-                <input type="datetime-local" className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]" />
+                <input
+                  type="datetime-local"
+                  className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]"
+                  value={draft.scheduledAt}
+                  onChange={(event) => setDraft((current) => ({ ...current, scheduledAt: event.target.value }))}
+                />
               </label>
             </div>
             <label className="block">
               <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Nội dung tin nhắn</span>
               <textarea
                 className="h-28 w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] leading-6 outline-none focus:border-[#0f8b98]"
-                value={preview}
-                onChange={(event) => setPreview(event.target.value)}
+                value={draft.body}
+                onChange={(event) => setDraft((current) => ({ ...current, body: event.target.value }))}
               />
               <span className="mt-1.5 block text-[11.5px] text-[#8492a0]">
-                {preview.length} ký tự • Biến động: {"{ten_khach}"}, {"{ten_sale}"}, {"{ma_don}"}
+                {draft.body.length} ký tự • Biến động: {"{ten_khach}"}, {"{ten_sale}"}, {"{ma_don}"}
               </span>
             </label>
           </div>
@@ -360,8 +428,8 @@ export function MessagingPage() {
             <div className="rounded-3xl border border-[#e6ebf0] p-4">
               <p className="text-[12.5px] font-black text-[#111a22]">Xem trước trên điện thoại</p>
               <div className="mt-3 rounded-[26px] border-[6px] border-[#101f27] bg-[#f4f7f9] p-3">
-                <div className="rounded-2xl bg-[#0b7fdb] px-3 py-2.5 text-[12px] leading-5 text-white">{preview}</div>
-                <p className="mt-2 text-center text-[10.5px] text-[#8492a0]">Callio OA • vừa xong</p>
+                <div className="rounded-2xl bg-[#0b7fdb] px-3 py-2.5 text-[12px] leading-5 text-white">{draft.body}</div>
+                <p className="mt-2 text-center text-[10.5px] text-[#8492a0]">{draft.brandname} • vừa xong</p>
               </div>
             </div>
             <div className="rounded-2xl bg-[#f8fafc] p-4">
@@ -388,10 +456,10 @@ export function MessagingPage() {
         open={Boolean(detail)}
         title={detail?.name ?? ""}
         subtitle={detail ? `${channelMeta[detail.channel].label} • ${detail.audience}` : ""}
-        onClose={() => setDetail(undefined)}
+        onClose={() => setDetailId(undefined)}
         footer={
           <>
-            <Button variant="ghost" onClick={() => setDetail(undefined)}>
+            <Button variant="ghost" onClick={() => setDetailId(undefined)}>
               Đóng
             </Button>
             <Button
@@ -403,7 +471,15 @@ export function MessagingPage() {
             >
               <IconClock size={15} /> {detail?.status === "dang-chay" ? "Tạm dừng" : "Kích hoạt"}
             </Button>
-            <Button onClick={() => dispatch({ type: "toast", message: "Đã nhân bản chiến dịch nhắn tin", tone: "success" })}>Nhân bản chiến dịch</Button>
+            <Button
+              onClick={() => {
+                if (!detail) return;
+                dispatch({ type: "duplicateMessagingCampaign", id: detail.id });
+                setDetailId(undefined);
+              }}
+            >
+              Nhân bản chiến dịch
+            </Button>
           </>
         }
       >
@@ -443,6 +519,62 @@ export function MessagingPage() {
             </div>
           </div>
         ) : null}
+      </Modal>
+
+      <Modal
+        open={Boolean(editingTemplate)}
+        title="Chỉnh sửa mẫu tin"
+        subtitle="Nội dung mới áp dụng cho các lần dùng mẫu tiếp theo"
+        onClose={() => setEditingTemplate(undefined)}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setEditingTemplate(undefined)}>
+              Huỷ
+            </Button>
+            <Button
+              disabled={templateDraft.name.trim() === "" || templateDraft.body.trim() === ""}
+              onClick={() => {
+                if (!editingTemplate) return;
+                dispatch({ type: "updateTemplate", id: editingTemplate, patch: templateDraft });
+                setEditingTemplate(undefined);
+              }}
+            >
+              Lưu mẫu tin
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <label className="block">
+            <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Tên mẫu tin</span>
+            <input
+              className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]"
+              value={templateDraft.name}
+              onChange={(event) => setTemplateDraft((current) => ({ ...current, name: event.target.value }))}
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Nhóm mẫu tin</span>
+            <select
+              className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]"
+              value={templateDraft.category}
+              onChange={(event) => setTemplateDraft((current) => ({ ...current, category: event.target.value as MessageTemplate["category"] }))}
+            >
+              <option value="cham-soc">Chăm sóc khách hàng</option>
+              <option value="marketing">Marketing</option>
+              <option value="giao-dich">Giao dịch</option>
+              <option value="nhac-hen">Nhắc hẹn</option>
+            </select>
+          </label>
+          <label className="block">
+            <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Nội dung</span>
+            <textarea
+              className="h-32 w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] leading-6 outline-none focus:border-[#0f8b98]"
+              value={templateDraft.body}
+              onChange={(event) => setTemplateDraft((current) => ({ ...current, body: event.target.value }))}
+            />
+          </label>
+        </div>
       </Modal>
     </div>
   );

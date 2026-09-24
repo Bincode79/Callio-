@@ -136,12 +136,32 @@ Không tạo thêm trang chi tiết hội thoại riêng: click vào danh sách 
 được, dùng `history.replaceState` thay vì đổi route — đổi route sẽ thay thế cả
 hộp thư và làm mất các chức năng xử lý.
 
+### Vòng đời chiến dịch nhắn tin
+
+Màn hình Nhắn tin có ba thao tác ghi dữ liệu thật, không còn nút giả:
+
+- Tạo chiến dịch: nội dung soạn tay được lưu **thành mẫu tin** dùng lại và chiến
+  dịch trỏ tới mẫu đó qua `templateId`. Lưu nháp để `status: "nhap"`, lên lịch gửi
+  để `status: "dang-chay"`; cả hai đều bắt đầu với 0 tin gửi.
+- Nhân bản chiến dịch: bản sao luôn ở `nhap` và **không mang theo số liệu** của bản
+  gốc (sent/delivered/opened/replied/failed đều 0), vì tái sử dụng số liệu cũ sẽ
+  làm sai báo cáo.
+- Sửa mẫu tin: cập nhật tên, nhóm và nội dung; chỉ đụng đúng mẫu được chọn và tự
+  làm mới `updatedAt`.
+
+Chi tiết chiến dịch đọc thẳng từ `state` theo mã (`detailId`) thay vì giữ bản sao,
+nên tạm dừng hoặc nhân bản xong là số liệu và trạng thái trong modal khớp ngay.
+
 ### Lead và khách hàng
 
 `Lead` và `Customer` là hai tập dữ liệu tách biệt; `Lead` không có `customerId`.
 Khi chia lead cho sales, reducer khớp theo số điện thoại (`digitsOnly`) để tìm hồ
 sơ ACRM sẵn có; nếu chưa có thì tạo hồ sơ mới từ dữ liệu lead
 (`customerFromLead`). Không gán task cho một khách hàng bất kỳ.
+
+Tạo hồ sơ thủ công trên ACRM cũng qua reducer (`createCustomer`): cấp mã mới bằng
+`nextCustomerCode` (không trùng mã sẵn có), gắn chủ sở hữu là người đang đăng nhập,
+và ghi một `TimelineEvent` "Tạo hồ sơ khách hàng" để hồ sơ mới có sẵn hành trình.
 
 ## Quy ước
 

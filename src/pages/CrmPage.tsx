@@ -45,7 +45,17 @@ import {
   IconTarget,
   IconUsers,
 } from "../components/icons";
-import type { Customer } from "../lib/types";
+import type { Customer, LeadSource } from "../lib/types";
+
+const EMPTY_CUSTOMER_DRAFT = {
+  name: "",
+  company: "",
+  phone: "",
+  email: "",
+  address: "",
+  source: "facebook" as LeadSource,
+  note: "",
+};
 
 export function CrmPage() {
   const { state, dispatch } = useApp();
@@ -57,6 +67,7 @@ export function CrmPage() {
   const [view, setView] = useState("danh-sach");
   const [detailId, setDetailId] = useState<string | undefined>(param);
   const [createOpen, setCreateOpen] = useState(false);
+  const [customerDraft, setCustomerDraft] = useState(EMPTY_CUSTOMER_DRAFT);
 
   const owners = useMemo(() => Array.from(new Set(state.customers.map((customer) => customer.owner))), [state.customers]);
 
@@ -295,9 +306,11 @@ export function CrmPage() {
               Huỷ
             </Button>
             <Button
+              disabled={customerDraft.name.trim() === "" || customerDraft.phone.trim() === ""}
               onClick={() => {
                 setCreateOpen(false);
-                dispatch({ type: "toast", message: "Đã tạo hồ sơ khách hàng mới và gửi SMS chào mừng", tone: "success" });
+                dispatch({ type: "createCustomer", draft: { ...customerDraft, name: customerDraft.name.trim() } });
+                setCustomerDraft(EMPTY_CUSTOMER_DRAFT);
               }}
             >
               Lưu hồ sơ
@@ -306,27 +319,72 @@ export function CrmPage() {
         }
       >
         <div className="grid gap-4 sm:grid-cols-2">
-          {[
-            { label: "Họ và tên", placeholder: "Nguyễn Văn A" },
-            { label: "Công ty", placeholder: "Công ty TNHH ABC" },
-            { label: "Số điện thoại", placeholder: "09xx xxx xxx" },
-            { label: "Email", placeholder: "email@congty.vn" },
-            { label: "Khu vực", placeholder: "Hà Nội" },
-            { label: "Nguồn dữ liệu", placeholder: "Facebook Ads" },
-          ].map((field) => (
-            <label key={field.label} className="block">
-              <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">{field.label}</span>
-              <input
-                className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]"
-                placeholder={field.placeholder}
-              />
-            </label>
-          ))}
+          <label className="block">
+            <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Họ và tên</span>
+            <input
+              className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]"
+              placeholder="Nguyễn Văn A"
+              value={customerDraft.name}
+              onChange={(event) => setCustomerDraft((current) => ({ ...current, name: event.target.value }))}
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Công ty</span>
+            <input
+              className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]"
+              placeholder="Công ty TNHH ABC"
+              value={customerDraft.company}
+              onChange={(event) => setCustomerDraft((current) => ({ ...current, company: event.target.value }))}
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Số điện thoại</span>
+            <input
+              className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]"
+              placeholder="09xx xxx xxx"
+              value={customerDraft.phone}
+              onChange={(event) => setCustomerDraft((current) => ({ ...current, phone: event.target.value }))}
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Email</span>
+            <input
+              className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]"
+              placeholder="email@congty.vn"
+              value={customerDraft.email}
+              onChange={(event) => setCustomerDraft((current) => ({ ...current, email: event.target.value }))}
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Khu vực</span>
+            <input
+              className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]"
+              placeholder="Hà Nội"
+              value={customerDraft.address}
+              onChange={(event) => setCustomerDraft((current) => ({ ...current, address: event.target.value }))}
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Nguồn dữ liệu</span>
+            <select
+              className="w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]"
+              value={customerDraft.source}
+              onChange={(event) => setCustomerDraft((current) => ({ ...current, source: event.target.value as LeadSource }))}
+            >
+              {Object.entries(leadSourceMeta).map(([key, meta]) => (
+                <option key={key} value={key}>
+                  {meta.label}
+                </option>
+              ))}
+            </select>
+          </label>
           <label className="block sm:col-span-2">
             <span className="mb-1.5 block text-[12.5px] font-bold text-[#4a5763]">Ghi chú nhu cầu</span>
             <textarea
               className="h-24 w-full rounded-xl border border-[#dfe6ec] px-3.5 py-2.5 text-[13.5px] outline-none focus:border-[#0f8b98]"
               placeholder="Mô tả nhu cầu, quy mô đội sales, ngân sách dự kiến..."
+              value={customerDraft.note}
+              onChange={(event) => setCustomerDraft((current) => ({ ...current, note: event.target.value }))}
             />
           </label>
         </div>
