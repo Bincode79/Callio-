@@ -11,6 +11,7 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 
+from .clientid import resolve_client_ip
 from .config import Settings, get_settings
 from .engines import Engines, build_engines
 from .ratelimit import TokenBucketLimiter
@@ -33,8 +34,8 @@ def create_app(
     """Dựng app. Tham số cho phép test tiêm cấu hình, engine giả và bộ giới hạn."""
     settings = settings or get_settings()
     engines = engines or build_engines(settings)
-    tts_limiter = tts_limiter or TokenBucketLimiter(settings.rate_limit_tts, settings.rate_limit_window_seconds)
-    stt_limiter = stt_limiter or TokenBucketLimiter(settings.rate_limit_stt, settings.rate_limit_window_seconds)
+    tts_limiter = tts_limiter or TokenBucketLimiter(settings.rate_limit_tts, settings.rate_limit_window_seconds, max_keys=settings.rate_limit_max_keys)
+    stt_limiter = stt_limiter or TokenBucketLimiter(settings.rate_limit_stt, settings.rate_limit_window_seconds, max_keys=settings.rate_limit_max_keys)
 
     app = FastAPI(title="Callio Voice API", version="1.2.0")
     app.state.settings = settings
@@ -63,9 +64,15 @@ def create_app(
             raise HTTPException(status_code=401, detail="Thiếu hoặc sai token xác thực")
 
     def client_key(request: Request, scope: str) -> str:
-        """Khoá giới hạn theo IP + phạm vi, để TTS và STT có hạn mức riêng."""
-        host = request.client.host if request.client else "unknown"
-        return f"{scope}:{host}"
+        """Khoá giới hạn theo IP thật + phạm vi, để TTS và STT có hạn mức riêng.
+
+        Chỉ tin `X-Forwarded-For` khi kết nối đến từ proxy đáng tin, nếu không kẻ gửi
+        có thể giả header để né hạn mức.
+        """
+        peer = request.client.host if request.client else None
+        forwarded = request.headers.get("x-forwarded-for")
+        ip = resolve_client_ip(peer, forwarded, settings.trusted_proxies)
+        return f"{scope}:{ip}"
 
     def make_limiter_dependency(scope: str, limiter: TokenBucketLimiter):
         """Sinh dependency giới hạn tần suất cho một phạm vi."""

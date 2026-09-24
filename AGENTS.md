@@ -250,10 +250,22 @@ token qua thời gian phản hồi. Giao diện gửi token qua `authHeaders()` 
 `src/lib/voiceApi.ts`; người dùng dán token ở **Callbot → Đổi giọng** (lưu
 `localStorage`), hoặc đặt `VITE_VOICE_TOKEN`. Chưa đặt thì để mở (tiện cho dev nội bộ).
 
-**Giới hạn tần suất:** `app/ratelimit.py` là token bucket theo IP, TTS/STT hạn mức
-riêng (`CALLIO_RATE_LIMIT_TTS` mặc định 60, `CALLIO_RATE_LIMIT_STT` mặc định 20 mỗi
+**Giới hạn tần suất:** `app/ratelimit.py` là token bucket, TTS/STT hạn mức riêng
+(`CALLIO_RATE_LIMIT_TTS` mặc định 60, `CALLIO_RATE_LIMIT_STT` mặc định 20 mỗi
 `CALLIO_RATE_LIMIT_WINDOW` giây). Vượt hạn mức trả **429** kèm `Retry-After`. Đồng hồ
 tiêm được (`clock`) nên test kiểm soát thời gian, không cần `sleep`. Đặt 0 để tắt.
+
+Hai điểm phải nhớ khi sửa phần này:
+
+- **Khoá theo IP thật, không tin header bừa.** `app/clientid.py` chỉ đọc
+  `X-Forwarded-For` khi kết nối đến từ `CALLIO_TRUSTED_PROXIES`; nếu tin vô điều kiện
+  thì ai cũng giả header để né hạn mức. Không cấu hình proxy thì mọi request dùng IP
+  kết nối — đúng khi chạy trực tiếp, **sai** khi chạy sau proxy (mọi người dùng chung
+  một hạn mức).
+- **Bộ nhớ có trần.** Mỗi IP là một bucket nên phải chặn rò rỉ:
+  `CALLIO_RATE_LIMIT_MAX_KEYS` (mặc định 10.000). Vượt trần thì dọn bucket đã nạp đầy
+  trước; nếu vẫn vượt (mọi bucket đang bị tiêu) thì xoá LRU — đánh đổi có ghi rõ trong
+  docstring, không phải bug.
 
 **Streaming:** `/api/tts/stream` phát dần từng đoạn audio (edge-tts hỗ trợ sẵn). Đo
 thực tế với edge-tts: byte đầu tới sau ~0,16s so với ~0,42s khi đợi cả tệp. Giao diện

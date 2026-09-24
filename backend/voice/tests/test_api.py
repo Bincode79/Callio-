@@ -6,6 +6,7 @@ Engine được tiêm bản giả nên test không cần mạng, không cần mo
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -13,6 +14,7 @@ from app.config import Settings
 from app.engines import Engines, build_engines
 from app.main import MAX_TTS_CHARS, create_app
 from app.providers import OpenAICompatibleStt, OpenAICompatibleTts
+from app.clientid import parse_forwarded_for, resolve_client_ip
 from app.ratelimit import TokenBucketLimiter
 from app.voices import VOICE_FEMALE, VOICE_MALE, resolve_voice
 
@@ -469,6 +471,121 @@ class RateLimitEndpointTests(unittest.TestCase):
         body = client.get("/api/health").json()
         self.assertEqual(body["rateLimit"]["tts"], 7)
         self.assertEqual(body["rateLimit"]["stt"], 3)
+
+
+class ResolveClientIpTests(unittest.TestCase):
+    TRUSTED = frozenset({"10.0.0.1", "10.0.0.2"})
+
+    def test_ignores_forwarded_header_from_untrusted_peer(self):
+        # Kẻ tấn công tự đặt X-Forwarded-For để né hạn mức; phải bị bỏ qua.
+        ip = resolve_client_ip("203.0.113.9", "1.2.3.4", self.TRUSTED)
+        self.assertEqual(ip, "203.0.113.9")
+
+    def test_uses_forwarded_header_from_trusted_proxy(self):
+        ip = resolve_client_ip("10.0.0.1", "203.0.113.9", self.TRUSTED)
+        self.assertEqual(ip, "203.0.113.9", "sau proxy tin cậy thì lấy IP người dùng thật")
+
+    def test_skips_trailing_trusted_proxies(self):
+        # Chuỗi thật: client, proxy1(tin cậy). IP ngoài cùng bên phải không tin cậy là client.
+        ip = resolve_client_ip("10.0.0.2", "203.0.113.9, 10.0.0.1", self.TRUSTED)
+        self.assertEqual(ip, "203.0.113.9")
+
+    def test_all_trusted_chain_falls_back_to_peer(self):
+        ip = resolve_client_ip("10.0.0.1", "10.0.0.2, 10.0.0.1", self.TRUSTED)
+        self.assertEqual(ip, "10.0.0.1", "không tìm được client thật thì dùng IP kết nối")
+
+    def test_no_trusted_proxies_means_header_never_used(self):
+        ip = resolve_client_ip("203.0.113.9", "1.2.3.4", frozenset())
+        self.assertEqual(ip, "203.0.113.9")
+
+    def test_missing_peer_is_unknown(self):
+        self.assertEqual(resolve_client_ip(None, "1.2.3.4", self.TRUSTED), "unknown")
+
+    def test_parse_forwarded_for_trims_and_drops_empty(self):
+        self.assertEqual(parse_forwarded_for(" 1.1.1.1 , , 2.2.2.2 "), ["1.1.1.1", "2.2.2.2"])
+        self.assertEqual(parse_forwarded_for(None), [])
+        self.assertEqual(parse_forwarded_for(""), [])
+
+
+class RateLimitKeyTests(unittest.TestCase):
+    def build(self, **settings_kwargs):
+        settings = Settings(**settings_kwargs)
+        engines = Engines(tts=FakeTts(), stt=FakeStt())
+        clock = FakeClock()
+        tts_limiter = TokenBucketLimiter(settings.rate_limit_tts, settings.rate_limit_window_seconds, clock)
+        stt_limiter = TokenBucketLimiter(settings.rate_limit_stt, settings.rate_limit_window_seconds, clock)
+        app = create_app(settings=settings, engines=engines, tts_limiter=tts_limiter, stt_limiter=stt_limiter)
+        return TestClient(app), tts_limiter
+
+    def test_spoofed_forwarded_for_cannot_bypass_limit(self):
+        # Không cấu hình proxy tin cậy: mọi header X-Forwarded-For khác nhau phải
+        # dùng chung một hạn mức theo IP kết nối thật.
+        client, _ = self.build(rate_limit_tts=1)
+        first = client.post("/api/tts", data={"text": "a"}, headers={"X-Forwarded-For": "1.1.1.1"})
+        self.assertEqual(first.status_code, 200)
+
+        second = client.post("/api/tts", data={"text": "a"}, headers={"X-Forwarded-For": "9.9.9.9"})
+        self.assertEqual(second.status_code, 429, "đổi header giả không được né hạn mức")
+
+    def test_trusted_proxy_separates_real_clients(self):
+        client, _ = self.build(rate_limit_tts=1, trusted_proxies=frozenset({"testclient"}))
+        first = client.post("/api/tts", data={"text": "a"}, headers={"X-Forwarded-For": "1.1.1.1"})
+        self.assertEqual(first.status_code, 200)
+
+        # Cùng proxy nhưng khác người dùng thật -> hạn mức riêng.
+        other = client.post("/api/tts", data={"text": "a"}, headers={"X-Forwarded-For": "2.2.2.2"})
+        self.assertEqual(other.status_code, 200)
+
+        # Quay lại người dùng đầu -> đã cạn.
+        again = client.post("/api/tts", data={"text": "a"}, headers={"X-Forwarded-For": "1.1.1.1"})
+        self.assertEqual(again.status_code, 429)
+
+
+class LimiterEvictionTests(unittest.TestCase):
+    def test_bucket_count_stays_bounded(self):
+        limiter = TokenBucketLimiter(capacity=1, window_seconds=60, clock=FakeClock(), max_keys=5)
+        # Nhiều IP khác nhau, mỗi IP gọi 1 lần (bucket đầy sau khi nạp lại).
+        for i in range(50):
+            limiter.allow(f"tts:10.0.0.{i}")
+        self.assertLessEqual(len(limiter._buckets), 5 + 1, "số bucket phải bị chặn trần")
+
+    def test_eviction_prefers_full_buckets_so_throttled_client_stays_blocked(self):
+        clock = FakeClock()
+        # Đủ chỗ cho nhiều bucket chưa bị tiêu, nên giai đoạn 1 dọn được mà không cần LRU.
+        limiter = TokenBucketLimiter(capacity=1, window_seconds=60, clock=clock, max_keys=3)
+        self.assertTrue(limiter.allow("tts:A"))
+        self.assertFalse(limiter.allow("tts:A"))
+
+        # Các IP mới đều gọi 1 lần -> bucket của chúng vẫn đầy, là ứng viên dọn trước.
+        for i in range(3):
+            limiter.allow(f"tts:new-{i}")
+
+        self.assertFalse(limiter.allow("tts:A"), "bucket đã cạn không được ưu tiên dọn")
+
+    def test_eviction_under_extreme_pressure_is_documented_tradeoff(self):
+        # Khi MỌI bucket đều đang bị tiêu và vượt trần, limiter chọn bảo vệ bộ nhớ:
+        # bucket cũ nhất bị xoá, nghĩa là client đó có thể được cấp lại hạn mức.
+        # Đây là đánh đổi có ý thức, được ghi rõ trong docstring của limiter.
+        clock = FakeClock()
+        limiter = TokenBucketLimiter(capacity=1, window_seconds=60, clock=clock, max_keys=2)
+        self.assertTrue(limiter.allow("tts:A"))
+        self.assertFalse(limiter.allow("tts:A"))
+
+        for i in range(5):
+            limiter.allow(f"tts:busy-{i}")
+            # Giữ mỗi bucket đều cạn bằng cách gọi lần hai.
+            limiter.allow(f"tts:busy-{i}")
+
+        self.assertLessEqual(len(limiter._buckets), 2 + 1, "bộ nhớ vẫn bị chặn trần")
+
+
+class RunScriptTests(unittest.TestCase):
+    def test_uvicorn_disables_proxy_headers(self):
+        # uvicorn mặc định bật --proxy-headers và tin loopback, nên nó ghi đè
+        # request.client.host bằng X-Forwarded-For trước khi app chạy. Nếu cờ này biến
+        # mất, kẻ gửi tự đặt header sẽ né được giới hạn tần suất (đã từng xảy ra thật).
+        script = (Path(__file__).resolve().parent.parent / "run.sh").read_text(encoding="utf-8")
+        self.assertIn("--no-proxy-headers", script)
 
 
 if __name__ == "__main__":

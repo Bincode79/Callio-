@@ -27,11 +27,14 @@ class TokenBucketLimiter:
     dùng thay vì chặn cứng theo cửa sổ.
     """
 
-    def __init__(self, capacity: int, window_seconds: float, clock=time.monotonic) -> None:
+    def __init__(self, capacity: int, window_seconds: float, clock=time.monotonic, max_keys: int = 10_000) -> None:
         # capacity <= 0 nghĩa là tắt giới hạn.
         self._capacity = max(0, capacity)
         self._window_seconds = window_seconds if window_seconds > 0 else 60.0
         self._clock = clock
+        # `max_keys` chặn rò rỉ bộ nhớ: mỗi IP tạo một bucket, mà request có thể đến
+        # từ rất nhiều IP. Khi vượt ngưỡng, dọn bucket đã nạp đầy (không còn tác dụng).
+        self._max_keys = max(1, max_keys)
         self._buckets: dict[str, Bucket] = {}
         # FastAPI có thể chạy nhiều thread; khoá để tránh đọc/ghi đan xen.
         self._lock = threading.Lock()
@@ -42,6 +45,38 @@ class TokenBucketLimiter:
 
     def _refill_rate(self) -> float:
         return self._capacity / self._window_seconds
+
+    def _evict_full_buckets_locked(self, now: float) -> None:
+        """Dọn bucket khi vượt `max_keys`, ưu tiên bucket đã nạp đầy.
+
+        Hai giai đoạn:
+        1. Xoá bucket đã nạp đầy trở lại — chúng tương đương "chưa từng thấy", nên xoá
+           không ảnh hưởng hạn mức của ai.
+        2. Nếu vẫn vượt trần (mọi bucket đều đang bị tiêu), xoá dần bucket **lâu chưa
+           đụng nhất**. Đây là đánh đổi có ý thức: bảo vệ bộ nhớ quan trọng hơn việc
+           giữ hạn mức tuyệt đối cho một IP cụ thể, mà trần 10.000 khoá là rất khó để
+           một kẻ tấn công vượt qua chỉ bằng cách đổi IP.
+        """
+        if len(self._buckets) <= self._max_keys:
+            return
+
+        for key in list(self._buckets.keys()):
+            if len(self._buckets) <= self._max_keys:
+                return
+            bucket = self._buckets[key]
+            elapsed = max(0.0, now - bucket.updated_at)
+            if bucket.tokens + elapsed * self._refill_rate() >= float(self._capacity):
+                del self._buckets[key]
+
+        if len(self._buckets) <= self._max_keys:
+            return
+
+        # Vẫn vượt trần: xoá theo thứ tự cũ nhất trước.
+        oldest = sorted(self._buckets.items(), key=lambda item: item[1].updated_at)
+        for key, _bucket in oldest:
+            if len(self._buckets) <= self._max_keys:
+                return
+            del self._buckets[key]
 
     def allow(self, key: str, cost: int = 1) -> bool:
         """Trừ `cost` token cho `key`; trả False nếu không đủ token.
@@ -54,6 +89,7 @@ class TokenBucketLimiter:
         with self._lock:
             bucket = self._buckets.get(key)
             if bucket is None:
+                self._evict_full_buckets_locked(now)
                 bucket = Bucket(tokens=float(self._capacity), updated_at=now)
                 self._buckets[key] = bucket
             elapsed = max(0.0, now - bucket.updated_at)

@@ -18,4 +18,9 @@ if ! python3 -c "import fastapi, uvicorn" >/dev/null 2>&1; then
 fi
 
 echo "Voice API chạy tại http://${HOST}:${PORT} (model: ${CALLIO_WHISPER_MODEL:-small})"
-exec python3 -m uvicorn app.main:app --host "$HOST" --port "$PORT"
+
+# uvicorn mặc định BẬT --proxy-headers và tin loopback, nên nó tự ghi đè
+# `request.client.host` bằng X-Forwarded-For — nghĩa là kẻ gửi tự đặt header là né
+# được giới hạn tần suất ở tầng ứng dụng. Tắt hẳn để logic trong `app/clientid.py`
+# là nơi duy nhất quyết định IP, và chỉ tin proxy khi cấu hình CALLIO_TRUSTED_PROXIES.
+exec python3 -m uvicorn app.main:app --host "$HOST" --port "$PORT" --no-proxy-headers

@@ -43,15 +43,39 @@ nên chỉ cần chạy `npm run dev` song song là giao diện tự nhận back
 | `CALLIO_RATE_LIMIT_TTS` | `60` | Số request TTS mỗi cửa sổ (0 = tắt). |
 | `CALLIO_RATE_LIMIT_STT` | `20` | Số request STT mỗi cửa sổ (0 = tắt) — thấp hơn vì tốn CPU hơn. |
 | `CALLIO_RATE_LIMIT_WINDOW` | `60` | Độ dài cửa sổ giới hạn, tính bằng giây. |
+| `CALLIO_RATE_LIMIT_MAX_KEYS` | `10000` | Trần số bucket giữ trong bộ nhớ (chống rò rỉ khi nhiều IP). |
+| `CALLIO_TRUSTED_PROXIES` | (trống) | IP proxy được tin để đọc `X-Forwarded-For`, cách nhau dấu phẩy. |
 
 ## Giới hạn tần suất
 
-Thuật toán token bucket theo IP + phạm vi (TTS/STT riêng). `capacity=30, window=60`
-nghĩa là trung bình 30 request/phút nhưng vẫn cho bùng nổ ngắn, phù hợp thao tác người
-dùng. Vượt hạn mức trả **429** kèm header `Retry-After` (giây) và thông báo tiếng Việt.
+Thuật toán token bucket, khoá theo **IP thật + phạm vi** (TTS/STT riêng). `capacity=30,
+window=60` nghĩa là trung bình 30 request/phút nhưng vẫn cho bùng nổ ngắn, phù hợp thao
+tác người dùng. Vượt hạn mức trả **429** kèm header `Retry-After` (giây) và thông báo
+tiếng Việt.
 
 Đặt `CALLIO_RATE_LIMIT_TTS=0` hoặc `CALLIO_RATE_LIMIT_STT=0` để tắt hẳn. `/api/health`
 báo lại hạn mức đang áp dụng.
+
+### Chạy sau reverse proxy
+
+Mặc định backend **không tin** `X-Forwarded-For`, vì ai cũng đặt được header đó để né
+hạn mức. Khi chạy sau proxy (nginx, Cloudflare, Traefik…), khai báo IP proxy:
+
+```bash
+CALLIO_TRUSTED_PROXIES=10.0.0.1,10.0.0.2 ./run.sh
+```
+
+Khi đó backend lấy IP người dùng thật (phần tử ngoài cùng bên phải **không** thuộc danh
+sách proxy tin cậy), nên mỗi người dùng có hạn mức riêng mà vẫn không giả mạo được.
+
+### Bộ nhớ
+
+Mỗi IP là một bucket. Khi vượt `CALLIO_RATE_LIMIT_MAX_KEYS`, limiter dọn bucket **đã nạp
+đầy** trước (xoá không ảnh hưởng ai). Nếu vẫn vượt trần — mọi bucket đều đang bị tiêu —
+nó xoá dần bucket **lâu chưa đụng nhất**. Đây là **đánh đổi có ý thức**: bảo vệ bộ nhớ
+quan trọng hơn việc giữ hạn mức tuyệt đối cho một IP, và trần 10.000 khoá rất khó bị vượt
+chỉ bằng cách đổi IP.
+
 
 
 ## Đổi engine sang mã nguồn mở khác

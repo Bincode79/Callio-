@@ -49,6 +49,11 @@ class Settings:
     rate_limit_tts: int = 60
     rate_limit_stt: int = 20
     rate_limit_window_seconds: float = 60.0
+    # Trần số bucket giữ trong bộ nhớ, tránh rò rỉ khi có nhiều IP.
+    rate_limit_max_keys: int = 10_000
+    # Danh sách IP proxy được tin để đọc X-Forwarded-For (cách nhau dấu phẩy). Để
+    # trống nếu chạy trực tiếp; nếu không, header giả có thể dùng để né hạn mức.
+    trusted_proxies: frozenset[str] = field(default_factory=frozenset)
 
 
 def _split_origins(raw: str) -> tuple[str, ...]:
@@ -77,4 +82,6 @@ def get_settings() -> Settings:
         rate_limit_tts=int(os.getenv("CALLIO_RATE_LIMIT_TTS", "60")),
         rate_limit_stt=int(os.getenv("CALLIO_RATE_LIMIT_STT", "20")),
         rate_limit_window_seconds=float(os.getenv("CALLIO_RATE_LIMIT_WINDOW", "60")),
+        rate_limit_max_keys=int(os.getenv("CALLIO_RATE_LIMIT_MAX_KEYS", "10000")),
+        trusted_proxies=frozenset(_split_origins(os.getenv("CALLIO_TRUSTED_PROXIES", ""))),
     )
