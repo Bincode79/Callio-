@@ -44,7 +44,8 @@ import {
   IconUsers,
 } from "../components/icons";
 import type { CallbotCampaign, CallbotResult, CallbotScriptStep } from "../lib/types";
-import { buildSpeechSegments, parseVoiceLabel, pickVoice, useSpeech } from "../lib/speech";
+import { buildSpeechSegments, parseVoiceLabel, pickVoice, useSpeech, useSpeechRecognition } from "../lib/speech";
+import { classifyCustomerReply, type ReplyIntent } from "../lib/callbot";
 
 const VOICE_BARS = Array.from({ length: 26 }, (_, seed) => ({ id: `voice-${seed}`, seed }));
 
@@ -78,6 +79,7 @@ export function CallbotPage() {
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [playing, setPlaying] = useState(false);
   const speech = useSpeech();
+  const recognition = useSpeechRecognition();
   const [stepIndex, setStepIndex] = useState(0);
   const [editingStep, setEditingStep] = useState<CallbotScriptStep | undefined>();
   const [detailResult, setDetailResult] = useState<CallbotResult | undefined>();
@@ -85,6 +87,9 @@ export function CallbotPage() {
   const [simTurns, setSimTurns] = useState<ReturnType<typeof simulateCall>["turns"]>([]);
   const [simRunning, setSimRunning] = useState(false);
   const [simVariant, setSimVariant] = useState(0);
+  // Câu khách nói thật qua micro, theo chỉ số bước. Bước chưa nói thì engine dùng
+  // lời mẫu, nên không cần điền đủ.
+  const [spokenReplies, setSpokenReplies] = useState<string[]>([]);
   const [draft, setDraft] = useState({
     name: "",
     goal: "xac-nhan-don" as CallbotCampaign["goal"],
@@ -205,7 +210,9 @@ export function CallbotPage() {
     if (!campaign || !simCustomer) return;
     window.clearInterval(simTimer.current);
 
-    const simulation = simulateCall(campaign, simCustomer, simVariant);
+    // Câu trả lời thật người dùng đã nói qua micro được đưa vào engine; chỗ nào
+    // chưa nói thì engine dùng lời mẫu như trước.
+    const simulation = simulateCall(campaign, simCustomer, simVariant, spokenReplies);
     setSimTurns([]);
 
     // Cuộc gọi bị quy tắc khung giờ chặn thì không có hội thoại để diễn; ghi
@@ -235,12 +242,53 @@ export function CallbotPage() {
         });
       }
     }, 700);
-  }, [campaign, simCustomer, simVariant, dispatch]);
+  }, [campaign, simCustomer, simVariant, spokenReplies, dispatch]);
 
   const stopSimulation = useCallback(() => {
     window.clearInterval(simTimer.current);
     setSimRunning(false);
   }, []);
+
+  // Bước kế tiếp sẽ nhận câu trả lời thật: bằng số câu đã nói.
+  const nextReplyStep = spokenReplies.length;
+
+  const startSpokenReply = useCallback(() => {
+    if (!recognition.supported) {
+      dispatch({ type: "toast", message: "Trình duyệt không hỗ trợ nhận diện giọng nói", tone: "warn" });
+      return;
+    }
+    if (nextReplyStep >= campaign.script.length) {
+      dispatch({ type: "toast", message: "Kịch bản đã hết bước để trả lời", tone: "warn" });
+      return;
+    }
+    speech.stop();
+    setPlaying(false);
+    recognition.start();
+    dispatch({ type: "toast", message: `Hãy nói câu trả lời cho bước ${nextReplyStep + 1}`, tone: "info" });
+  }, [recognition, nextReplyStep, campaign.script.length, speech, dispatch]);
+
+  // Khi nhận diện xong một câu thì lưu vào đúng bước để lần chạy kế tiếp dùng câu
+  // nói thật thay cho lời mẫu.
+  const lastCaptured = useRef<string>("");
+  useEffect(() => {
+    const text = recognition.transcript.trim();
+    if (text === "" || text === lastCaptured.current || recognition.listening) return;
+    lastCaptured.current = text;
+    setSpokenReplies((current) => {
+      const next = [...current];
+      next[current.length] = text;
+      return next;
+    });
+    dispatch({ type: "toast", message: `Đã ghi nhận câu trả lời: “${text}”`, tone: "success" });
+  }, [recognition.transcript, recognition.listening, dispatch]);
+
+  useEffect(() => {
+    if (recognition.error === "not-allowed" || recognition.error === "service-not-allowed") {
+      dispatch({ type: "toast", message: "Chưa được cấp quyền micro cho trang này", tone: "warn" });
+    } else if (recognition.error === "no-speech") {
+      dispatch({ type: "toast", message: "Không nghe thấy giọng nói, thử lại giúp tôi", tone: "warn" });
+    }
+  }, [recognition.error, dispatch]);
 
   const scriptIssues = useMemo(() => {
     if (!campaign) return [] as string[];
@@ -417,6 +465,14 @@ export function CallbotPage() {
                       <Button size="sm" variant="ghost" disabled={simRunning} onClick={() => setSimVariant((value) => value + 1)}>
                         Đổi tình huống
                       </Button>
+                      <Button
+                        size="sm"
+                        variant={recognition.listening ? "danger" : "outline"}
+                        onClick={() => (recognition.listening ? recognition.stop() : startSpokenReply())}
+                        disabled={!recognition.supported && !recognition.listening}
+                      >
+                        <IconMic size={14} /> {recognition.listening ? "Đang nghe..." : "Khách nói"}
+                      </Button>
                       {simRunning ? (
                         <Button size="sm" variant="outline" onClick={stopSimulation}>
                           <IconPause size={14} /> Dừng
@@ -530,13 +586,60 @@ export function CallbotPage() {
                       <p className="mt-3 rounded-xl bg-[#f8fafc] px-3.5 py-3 text-[13px] leading-6 text-[#33414d]">“{previewSay}”</p>
                     </div>
 
+                    <div className="rounded-2xl border border-[#edf1f5] p-4">
+                      <p className="flex items-center justify-between gap-2 text-[12.5px] font-black text-[#111a22]">
+                        <span className="flex items-center gap-2">
+                          <IconMic size={14} /> Câu trả lời thật
+                        </span>
+                        {spokenReplies.length > 0 ? (
+                          <button
+                            type="button"
+                            className="text-[11.5px] font-bold text-[#0f8b98] hover:underline"
+                            onClick={() => {
+                              setSpokenReplies([]);
+                              lastCaptured.current = "";
+                              recognition.reset();
+                            }}
+                          >
+                            Xoá hết
+                          </button>
+                        ) : null}
+                      </p>
+                      {!recognition.supported ? (
+                        <p className="mt-2 text-[11.5px] leading-5 text-[#b45309]">
+                          Trình duyệt này không hỗ trợ nhận diện giọng nói. Vẫn có thể chạy mô phỏng bằng lời mẫu.
+                        </p>
+                      ) : spokenReplies.length === 0 ? (
+                        <p className="mt-2 text-[11.5px] leading-5 text-[#8492a0]">
+                          Bấm “Khách nói” rồi đọc câu trả lời của khách. Câu nói thật sẽ thay lời mẫu ở bước tương ứng khi chạy mô phỏng.
+                        </p>
+                      ) : (
+                        <ul className="mt-3 space-y-2">
+                          {spokenReplies.map((reply, index) => (
+                            <li key={`${index}-${reply}`} className="rounded-xl bg-[#f8fafc] px-3 py-2 text-[12px] leading-5 text-[#33414d]">
+                              <span className="font-black text-[#0f8b98]">Bước {index + 1}: </span>
+                              “{reply}”
+                              <span className="ml-1 text-[11px] font-semibold text-[#8492a0]">
+                                (xử lý: {intentLabel(classifyCustomerReply(reply).intent)})
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {recognition.listening ? (
+                        <p className="mt-2 flex items-center gap-2 text-[11.5px] font-bold text-[#be123c]">
+                          <span className="h-2 w-2 animate-pulse rounded-full bg-[#be123c]" /> Đang nghe micro...
+                        </p>
+                      ) : null}
+                    </div>
+
                     <div className="rounded-2xl bg-[#101f27] p-4 text-white">
                       <p className="flex items-center gap-2 text-[12.5px] font-black">
                         <IconSparkle size={15} /> AI xử lý tình huống
                       </p>
                       <ul className="mt-3 space-y-2 text-[12px] text-white/75">
                         <li>• Khách ngắt lời: chờ 2 giây rồi tiếp tục kịch bản</li>
-                        <li>• Nhận diện giọng nói tiếng Việt, độ chính xác 96%</li>
+                        <li>• Khách nói câu trả lời thật qua micro thì engine phân loại và xử lý ngay</li>
                         <li>• Tự chuyển nhân viên khi khách yêu cầu gặp người thật</li>
                         <li>• Khách từ chối giữa cuộc gọi thì dừng ngay, không đọc tiếp</li>
                       </ul>
@@ -720,7 +823,7 @@ export function CallbotPage() {
                         </p>
                         <ul className="mt-3 space-y-2 text-[12px] text-white/75">
                           <li>• Khách ngắt lời: chờ 2 giây rồi tiếp tục kịch bản</li>
-                          <li>• Nhận diện giọng nói tiếng Việt, độ chính xác 96%</li>
+                          <li>• Nhận diện giọng nói tiếng Việt bằng micro (nếu trình duyệt hỗ trợ)</li>
                           <li>• Tự chuyển nhân viên khi khách yêu cầu gặp người thật</li>
                           <li>• Khách từ chối giữa cuộc gọi thì dừng ngay, không đọc tiếp</li>
                         </ul>
@@ -1328,5 +1431,18 @@ function branchLabel(branch: CallbotScriptStep["branch"]): string {
       return "Chuyển sang nhân viên thật";
     default:
       return "Kết thúc cuộc gọi";
+  }
+}
+
+function intentLabel(intent: ReplyIntent): string {
+  switch (intent) {
+    case "xac-nhan":
+      return "xác nhận";
+    case "tu-choi":
+      return "từ chối";
+    case "chuyen-nhan-vien":
+      return "xin gặp nhân viên";
+    default:
+      return "trung tính";
   }
 }

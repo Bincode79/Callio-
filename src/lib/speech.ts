@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fillVariables } from "./callbot";
 import type { CallbotCampaign, CallbotScriptStep, Customer } from "./types";
 
@@ -182,4 +182,139 @@ export function useSpeech(): UseSpeechValue {
   );
 
   return { supported, voices, speakingId, speak, speakSegments, stop };
+}
+
+/* ------------------------------------------------------------------ *
+ * Nhận diện giọng nói (Speech Recognition)
+ * ------------------------------------------------------------------ */
+
+/** Kiểu tối thiểu của SpeechRecognition để không phụ thuộc lib DOM của trình duyệt. */
+interface SpeechRecognitionResultLike {
+  readonly length: number;
+  item(index: number): { transcript: string; confidence: number } | undefined;
+  [index: number]: { transcript: string; confidence: number } | undefined;
+}
+
+interface SpeechRecognitionEventLike {
+  readonly resultIndex: number;
+  readonly results: {
+    readonly length: number;
+    [index: number]: SpeechRecognitionResultLike | undefined;
+  };
+}
+
+interface SpeechRecognitionLike {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  start(): void;
+  stop(): void;
+  abort(): void;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((event: { error: string }) => void) | null;
+  onend: (() => void) | null;
+}
+
+interface SpeechRecognitionCtor {
+  new (): SpeechRecognitionLike;
+}
+
+function recognitionCtor(): SpeechRecognitionCtor | undefined {
+  if (typeof window === "undefined") return undefined;
+  const w = window as unknown as {
+    SpeechRecognition?: SpeechRecognitionCtor;
+    webkitSpeechRecognition?: SpeechRecognitionCtor;
+  };
+  return w.SpeechRecognition ?? w.webkitSpeechRecognition;
+}
+
+/** Trình duyệt hiện tại có nhận diện giọng nói hay không (Chrome/Edge có, Safari/Firefox thường không). */
+export function recognitionSupported(): boolean {
+  return recognitionCtor() !== undefined;
+}
+
+/**
+ * Gộp các kết quả đã hoàn tất thành một câu, bỏ qua phần interim. Tách riêng để
+ * test được mà không cần trình duyệt.
+ */
+export function collectTranscript(event: SpeechRecognitionEventLike, fromIndex: number): string {
+  let text = "";
+  for (let i = fromIndex; i < event.results.length; i += 1) {
+    const alt = event.results[i]?.[0];
+    if (alt?.transcript) text += ` ${alt.transcript}`;
+  }
+  return text.trim();
+}
+
+interface UseSpeechRecognitionValue {
+  supported: boolean;
+  listening: boolean;
+  /** Câu nhận diện được gần nhất, chưa chuẩn hoá. */
+  transcript: string;
+  /** Mã lỗi gần nhất của trình duyệt (ví dụ "not-allowed" khi chưa cấp quyền micro). */
+  error: string | null;
+  start: () => boolean;
+  stop: () => void;
+  reset: () => void;
+}
+
+/**
+ * Bọc SpeechRecognition thành hook React. Mỗi lần `start` là một phiên nghe mới;
+ * kết quả được gộp dần và trả về qua `transcript`.
+ */
+export function useSpeechRecognition(lang: string = DEFAULT_VOICE_LANG): UseSpeechRecognitionValue {
+  const supported = recognitionSupported();
+  const [listening, setListening] = useState(false);
+  const [transcript, setTranscript] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const instanceRef = useRef<SpeechRecognitionLike | null>(null);
+
+  const stop = useCallback(() => {
+    instanceRef.current?.stop();
+    setListening(false);
+  }, []);
+
+  const reset = useCallback(() => {
+    setTranscript("");
+    setError(null);
+  }, []);
+
+  const start = useCallback(() => {
+    if (!supported) return false;
+    const Ctor = recognitionCtor();
+    if (!Ctor) return false;
+
+    // Mỗi phiên dùng một đối tượng mới: tái sử dụng instance sau khi end có thể
+    // không nhận thêm kết quả trên một số bản Chrome.
+    instanceRef.current?.abort();
+    const recognition = new Ctor();
+    recognition.lang = lang;
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.onresult = (event) => {
+      setTranscript(collectTranscript(event, event.resultIndex));
+    };
+    recognition.onerror = (event) => {
+      setError(event.error);
+      setListening(false);
+    };
+    recognition.onend = () => setListening(false);
+    instanceRef.current = recognition;
+    setTranscript("");
+    setError(null);
+    try {
+      recognition.start();
+      setListening(true);
+      return true;
+    } catch (err) {
+      // Gọi start khi phiên trước chưa đóng sẽ ném lỗi; coi như không bắt đầu được.
+      setError(err instanceof Error ? err.message : "start-failed");
+      setListening(false);
+      return false;
+    }
+  }, [supported, lang]);
+
+  useEffect(() => () => instanceRef.current?.abort(), []);
+
+  return { supported, listening, transcript, error, start, stop, reset };
 }

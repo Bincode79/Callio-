@@ -201,6 +201,24 @@ của trình duyệt, không còn là toast giả.
 - Thiết bị/trình duyệt không hỗ trợ thì giao diện báo rõ và vẫn cho chọn giọng để lưu
   vào chiến dịch, thay vì im lặng hoặc lỗi.
 
+### Khách trả lời thật bằng micro (Speech Recognition)
+
+Nút "Khách nói" cho phép đọc câu trả lời của khách; engine phân loại câu nói và chạy
+mô phỏng với câu thật thay cho lời mẫu ở bước tương ứng.
+
+- `classifyCustomerReply` (callbot) suy ý định từ câu nói: xác nhận / từ chối / xin gặp
+  nhân viên / trung tính. **Thứ tự kiểm tra quan trọng**: yêu cầu không làm phiền xét
+  trước tiên, vì câu "Dạ, đừng gọi cho tôi nữa" cũng chứa "dạ" nghe như đồng ý.
+- `simulateCall(campaign, customer, variant, spokenReplies)` nhận mảng câu nói thật
+  theo chỉ số bước; bước không có câu nói thì dùng lời mẫu. Ý định từ câu thật được
+  ưu tiên quyết định kết quả (không suy từ nhánh bước cuối), và khách chủ động xin gặp
+  nhân viên thì chuyển máy bất kể quy tắc `escalateNegative`.
+- Hook `useSpeechRecognition` tạo instance mới mỗi phiên (tái dùng sau `end` có thể
+  không nhận kết quả trên vài bản Chrome), gộp kết quả cuối và báo mã lỗi (ví dụ
+  `not-allowed` khi chưa cấp quyền micro).
+- Trình duyệt không hỗ trợ nhận diện (Safari/Firefox thường không) thì nút bị vô hiệu
+  và giao diện nói rõ; vẫn mô phỏng được bằng lời mẫu.
+
 ## Quy ước
 
 - Toàn bộ nội dung hiển thị cho người dùng là tiếng Việt. Slug route dùng dạng

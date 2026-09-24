@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildSpeechSegments, parseVoiceLabel, pickVoice } from "./speech.ts";
+import { buildSpeechSegments, collectTranscript, parseVoiceLabel, pickVoice } from "./speech.ts";
 import { callbotCampaigns, customers } from "./data.ts";
 
 const customer = customers[0];
@@ -97,5 +97,33 @@ describe("dựng đoạn đọc từ kịch bản", () => {
       segments.map((segment) => segment.id),
       campaign.script.map((step) => step.id),
     );
+  });
+});
+
+
+describe("gộp kết quả nhận diện giọng nói", () => {
+  // Dựng event tối thiểu giống SpeechRecognitionResultList để test thuần.
+  const event = (lines: string[], resultIndex = 0) => ({
+    resultIndex,
+    results: {
+      length: lines.length,
+      ...Object.fromEntries(lines.map((line, index) => [index, { 0: { transcript: line, confidence: 0.9 }, length: 1 }])),
+    },
+  });
+
+  it("nối các câu đã nhận diện từ resultIndex", () => {
+    assert.equal(collectTranscript(event(["Dạ đúng rồi", "em xác nhận"]), 0), "Dạ đúng rồi em xác nhận");
+  });
+
+  it("bỏ qua phần đã xử lý trước resultIndex", () => {
+    assert.equal(collectTranscript(event(["câu cũ", "câu mới"], 1), 1), "câu mới");
+  });
+
+  it("trả chuỗi rỗng khi chưa có kết quả", () => {
+    assert.equal(collectTranscript(event([]), 0), "");
+  });
+
+  it("bỏ ô thiếu transcript thay vì ném lỗi", () => {
+    assert.equal(collectTranscript(event(["Dạ vâng", ""]), 0), "Dạ vâng");
   });
 });

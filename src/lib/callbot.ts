@@ -59,6 +59,12 @@ export interface SimulationOutcome {
 
 /** Các cụm từ cho thấy khách không muốn bị liên hệ tiếp. */
 const OPT_OUT_PHRASES = ["đừng gọi", "đừng liên lạc", "không làm phiền", "không muốn nhận"];
+/** Cụm từ thể hiện khách đồng ý/xác nhận. */
+const AFFIRM_PHRASES = ["đúng rồi", "đồng ý", "xác nhận", "ok", "oke", "được", "ừ", "vâng", "dạ đúng"];
+/** Cụm từ thể hiện khách từ chối. */
+const DECLINE_PHRASES = ["không", "chưa", "từ chối", "thôi", "không cần", "bận", "để sau"];
+/** Cụm từ thể hiện khách muốn gặp người thật. */
+const HUMAN_PHRASES = ["gặp người", "nhân viên", "chuyên viên", "gặp người thật", "nói chuyện với người"];
 /** Giờ và phút hiện tại theo múi giờ vận hành của tổng đài. */
 function currentTimeInZone(): { hour: number; minute: number } {
   const parts = new Intl.DateTimeFormat("en-GB", {
@@ -91,6 +97,28 @@ export function hasOptedOut(text: string): boolean {
   // Phải chuẩn hoá cả từ khoá, nếu không thì chuỗi đã bỏ dấu sẽ không bao giờ
   // khớp được với cụm còn dấu.
   return OPT_OUT_PHRASES.some((phrase) => normalized.includes(plain(phrase)));
+}
+
+/** Ý định suy ra được từ câu nói của khách, dùng khi khách trả lời thật qua micro. */
+export type ReplyIntent = "xac-nhan" | "tu-choi" | "chuyen-nhan-vien" | "trung-tinh";
+
+function includesAny(normalized: string, phrases: readonly string[]): boolean {
+  return phrases.some((phrase) => normalized.includes(plain(phrase)));
+}
+
+/**
+ * Phân loại câu nói thật của khách thành ý định để engine xử lý. Thứ tự kiểm tra
+ * quan trọng: yêu cầu không làm phiền phải xét trước cùng, vì câu đó cũng có thể
+ * chứa từ ngữ nghe như đồng ý ("dạ", "ừ").
+ */
+export function classifyCustomerReply(text: string): { intent: ReplyIntent; sentiment: CallbotTurn["sentiment"] } {
+  const normalized = plain(text).trim();
+  if (normalized === "") return { intent: "trung-tinh", sentiment: "trung-tinh" };
+  if (hasOptedOut(text)) return { intent: "tu-choi", sentiment: "tieu-cuc" };
+  if (includesAny(normalized, HUMAN_PHRASES)) return { intent: "chuyen-nhan-vien", sentiment: "trung-tinh" };
+  if (includesAny(normalized, DECLINE_PHRASES)) return { intent: "tu-choi", sentiment: "tieu-cuc" };
+  if (includesAny(normalized, AFFIRM_PHRASES)) return { intent: "xac-nhan", sentiment: "tich-cuc" };
+  return { intent: "trung-tinh", sentiment: "trung-tinh" };
 }
 
 /** Bỏ dấu để so khớp từ khoá trong phiên âm mà không phân biệt dấu. */
@@ -132,6 +160,7 @@ export function simulateCall(
   campaign: CallbotCampaign,
   customer: Customer,
   variant = 0,
+  spokenReplies: string[] = [],
 ): SimulationOutcome {
   // Quy tắc khung giờ: không gọi ngoài giờ cho phép thì dừng trước khi bấm số.
   if (campaign.rules.quietHours && !isWithinWindow(campaign.windowStart, campaign.windowEnd)) {
@@ -159,6 +188,9 @@ export function simulateCall(
   let optedOut = false;
   let escalated = false;
   let stoppedEarly = false;
+  // Ý định của câu nói thật gần nhất, để kết quả phản ánh đúng điều khách vừa nói
+  // thay vì chỉ suy từ nhánh của bước cuối trong kịch bản.
+  let lastSpokenIntent: ReplyIntent | undefined;
 
   for (const [index, step] of campaign.script.entries()) {
     clock += 3 + (index % 3);
@@ -170,8 +202,14 @@ export function simulateCall(
       intent: step.label,
     });
 
+    // Khách có thể trả lời thật (qua micro, đã nhận diện giọng nói) cho từng bước;
+    // khi đó dùng đúng câu nói và ý định suy ra từ câu đó thay vì kịch bản mẫu.
+    const spoken = spokenReplies[index];
     const replies = CUSTOMER_REPLIES[step.branch];
-    const reply = replies[(variant + index) % replies.length];
+    const fallback = replies[(variant + index) % replies.length];
+    const spokenClass = spoken ? classifyCustomerReply(spoken) : undefined;
+    const reply = spokenClass && spoken ? { text: spoken, ...spokenClass } : fallback;
+    if (spokenClass) lastSpokenIntent = spokenClass.intent;
     clock += 2 + (index % 4);
     turns.push({
       id: `${campaign.id}-${customer.id}-t${index}-khach`,
@@ -200,10 +238,12 @@ export function simulateCall(
       break;
     }
 
-    // Khách từ chối giữa cuộc gọi thì dừng ngay, không đọc các bước sau.
-    if (reply.intent === "Từ chối") {
+    // Khách từ chối giữa cuộc gọi thì dừng ngay, không đọc các bước sau. Ý định
+    // "chuyen-nhan-vien" (khách xin gặp người thật) cũng đi vào nhánh chuyển máy.
+    const wantsHuman = reply.intent === "chuyen-nhan-vien";
+    if (reply.intent === "Từ chối" || reply.intent === "tu-choi" || wantsHuman) {
       // Quy tắc chuyển nhân viên: phản hồi tiêu cực được nối máy thay vì kết thúc.
-      if (campaign.rules.escalateNegative) {
+      if (campaign.rules.escalateNegative || wantsHuman) {
         escalated = true;
         clock += 2;
         turns.push({
@@ -229,13 +269,17 @@ export function simulateCall(
   }
 
   const lastBranch = campaign.script[Math.min(stepReached, campaign.script.length) - 1]?.branch ?? "ket-thuc";
-  const declined = turns.some((turn) => turn.intent === "Từ chối");
+  const declined = turns.some((turn) => turn.intent === "Từ chối" || turn.intent === "tu-choi");
   // Bị chuyển nhân viên nghĩa là cần người thật gọi lại, không phải khách từ chối hẳn.
+  // Câu nói thật của khách được ưu tiên: khách đã nói rõ đồng ý/từ chối thì kết quả
+  // theo đúng điều đó, không suy từ nhánh của bước cuối trong kịch bản mẫu.
+  const spokenOutcome: CallbotResult["outcome"] | undefined =
+    lastSpokenIntent === "xac-nhan" ? "xac-nhan" : lastSpokenIntent === "tu-choi" ? "tu-choi" : undefined;
   const outcome: CallbotResult["outcome"] = escalated
     ? "hen-goi-lai"
     : declined || optedOut
       ? "tu-choi"
-      : OUTCOME_BY_BRANCH[lastBranch];
+      : spokenOutcome ?? OUTCOME_BY_BRANCH[lastBranch];
 
   const customerTurns = turns.filter((turn) => turn.speaker === "khach");
   const positive = customerTurns.filter((turn) => turn.sentiment === "tich-cuc").length;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { fillVariables, hasOptedOut, hasTerminalStep, isWithinWindow, resultFromSimulation, simulateCall, variablesInScript } from "./callbot.ts";
+import { classifyCustomerReply, fillVariables, hasOptedOut, hasTerminalStep, isWithinWindow, resultFromSimulation, simulateCall, variablesInScript } from "./callbot.ts";
 import { callbotCampaigns, customers } from "./data.ts";
 import type { CallbotCampaign } from "./types.ts";
 
@@ -163,5 +163,80 @@ describe("chuyển kết quả mô phỏng thành bản ghi", () => {
     assert.ok(record.blockedReason, "bản ghi phải giữ lý do bị chặn để xem lại");
     assert.equal(record.escalated, false);
     assert.equal(record.optedOut, false);
+  });
+});
+
+
+describe("phân loại câu trả lời thật của khách", () => {
+  it("nhận diện đồng ý và gắn cảm xúc tích cực", () => {
+    const result = classifyCustomerReply("Dạ đúng rồi em");
+    assert.equal(result.intent, "xac-nhan");
+    assert.equal(result.sentiment, "tich-cuc");
+  });
+
+  it("nhận diện từ chối, kể cả không dấu", () => {
+    assert.equal(classifyCustomerReply("Không, thôi để sau").intent, "tu-choi");
+    assert.equal(classifyCustomerReply("khong can dau").intent, "tu-choi");
+  });
+
+  it("ưu tiên yêu cầu không làm phiền hơn các từ nghe như đồng ý", () => {
+    // Câu này chứa "dạ" (thoạt nghe như đồng ý) nhưng không có từ khoá từ chối nào
+    // khác; nếu bỏ kiểm tra opt-out thì sẽ rơi xuống nhánh đồng ý và test này đỏ.
+    const result = classifyCustomerReply("Dạ, đừng gọi cho tôi nữa nhé");
+    assert.equal(result.intent, "tu-choi", "yêu cầu không làm phiền phải được xét trước từ đồng ý");
+    assert.equal(result.sentiment, "tieu-cuc");
+  });
+
+  it("nhận diện khách muốn gặp nhân viên", () => {
+    assert.equal(classifyCustomerReply("Cho tôi gặp nhân viên đi").intent, "chuyen-nhan-vien");
+  });
+
+  it("câu trung tính hoặc rỗng thì không suy diễn", () => {
+    assert.equal(classifyCustomerReply("Alo, ai đấy ạ?").intent, "trung-tinh");
+    assert.equal(classifyCustomerReply("   ").intent, "trung-tinh");
+  });
+});
+
+describe("mô phỏng với câu trả lời thật qua micro", () => {
+  it("dùng câu nói thật thay lời mẫu ở bước tương ứng", () => {
+    const simulation = simulateCall(withRules({}), customer, 0, ["Dạ em nghe đây ạ", "Dạ đúng rồi em"]);
+    const customerTurns = simulation.turns.filter((turn) => turn.speaker === "khach");
+
+    assert.equal(customerTurns[0]?.text, "Dạ em nghe đây ạ");
+    assert.equal(customerTurns[1]?.text, "Dạ đúng rồi em");
+  });
+
+  it("khách nói từ chối thì dừng cuộc gọi ngay", () => {
+    const simulation = simulateCall(withRules({ escalateNegative: false }), customer, 0, ["Không, thôi đừng gọi nữa"]);
+    assert.equal(simulation.stoppedEarly, true, "phải dừng trước khi đọc hết kịch bản");
+    assert.equal(simulation.outcome, "tu-choi");
+  });
+
+  it("khách xin gặp nhân viên thì chuyển máy dù quy tắc chuyển nhân viên đang tắt", () => {
+    const simulation = simulateCall(withRules({ escalateNegative: false }), customer, 0, ["Cho tôi gặp nhân viên"]);
+    assert.equal(simulation.escalated, true, "khách chủ động xin gặp người thật thì phải chuyển, không phụ thuộc quy tắc");
+    assert.ok(simulation.turns.some((turn) => turn.intent === "Chuyển nhân viên"));
+  });
+
+  it("khách nói đồng ý thì kết quả là xác nhận dù nhánh bước cuối là kết thúc", () => {
+    // Không nói gì ở các bước cuối nhưng bước 2 nói đồng ý; kết quả phải theo câu thật.
+    const simulation = simulateCall(withRules({}), customer, 0, ["Dạ nghe đây", "Dạ đúng rồi em xác nhận"]);
+    assert.equal(simulation.outcome, "xac-nhan");
+  });
+
+  it("chỗ không nói thì vẫn dùng lời mẫu, không làm hỏng mô phỏng", () => {
+    const withSpoken = simulateCall(withRules({}), customer, 0, ["Dạ em nghe đây ạ"]);
+    const withoutSpoken = simulateCall(withRules({}), customer, 0);
+    assert.equal(withSpoken.turns.length, withoutSpoken.turns.length, "vẫn đủ số lượt như khi không nói");
+  });
+  it("câu đồng ý thật quyết định kết quả, không phụ thuộc nhánh bước cuối", () => {
+    // Kịch bản một bước với nhánh "chuyen-nhan-vien" (mặc định ra hen-goi-lai). Khách
+    // nói đồng ý rõ ràng thì kết quả phải là xác nhận; bỏ phần ưu tiên câu nói thật
+    // thì test này đỏ vì rơi về nhánh của bước cuối.
+    const oneStep = withRules({}, {
+      script: [{ id: "s1", label: "Xác nhận", say: "Anh/chị xác nhận giúp em nhé", expect: "", branch: "chuyen-nhan-vien" }],
+    });
+    const simulation = simulateCall(oneStep, customer, 0, ["Dạ đúng rồi em xác nhận"]);
+    assert.equal(simulation.outcome, "xac-nhan");
   });
 });
