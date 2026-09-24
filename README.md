@@ -23,6 +23,7 @@ Các câu lệnh khác:
 
 ```bash
 npm run build    # kiểm tra kiểu và build ra thư mục dist
+npm test         # chạy test cho engine gọi AI
 npm run preview  # xem thử bản build
 npm run lint     # kiểm tra kiểu + lint và tự sửa
 npm run format   # định dạng mã nguồn

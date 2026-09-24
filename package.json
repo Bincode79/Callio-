@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build --outDir dist",
+    "test": "node scripts/run-tests.mjs",
     "lint": "bunx tsc --noEmit && bunx biome lint --write",
     "format": "bunx biome format --write",
     "preview": "vite preview"
@@ -20,6 +21,7 @@
   "devDependencies": {
     "@biomejs/biome": "1.9.4",
     "@eslint/js": "^9.27.0",
+    "@types/node": "^26.6.2",
     "@types/react": "^18.3.22",
     "@types/react-dom": "^18.3.7",
     "@typescript-eslint/eslint-plugin": "^8.32.1",

@@ -1,0 +1,33 @@
+name: Kiểm tra
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    name: Kiểm tra kiểu, lint và test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Cài dependency
+        run: npm ci
+
+      - name: Kiểm tra kiểu
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npx biome lint src
+
+      - name: Chạy test
+        run: npm test
+
+      - name: Build
+        run: npm run build
