@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
 // Liệt kê tường minh để không phụ thuộc glob của shell; thêm bộ test mới thì thêm vào đây.
-const testFiles = [resolve(root, "src/lib/callbot.test.ts"), resolve(root, "src/lib/store.test.tsx")];
+const testFiles = [resolve(root, "src/lib/callbot.test.ts"), resolve(root, "src/lib/store.test.tsx"), resolve(root, "src/lib/speech.test.ts")];
 
 const outDir = mkdtempSync(join(tmpdir(), "callio-test-"));
 const outFiles = [];

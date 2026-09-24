@@ -44,6 +44,7 @@ import {
   IconUsers,
 } from "../components/icons";
 import type { CallbotCampaign, CallbotResult, CallbotScriptStep } from "../lib/types";
+import { buildSpeechSegments, parseVoiceLabel, pickVoice, useSpeech } from "../lib/speech";
 
 const VOICE_BARS = Array.from({ length: 26 }, (_, seed) => ({ id: `voice-${seed}`, seed }));
 
@@ -76,6 +77,7 @@ export function CallbotPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [playing, setPlaying] = useState(false);
+  const speech = useSpeech();
   const [stepIndex, setStepIndex] = useState(0);
   const [editingStep, setEditingStep] = useState<CallbotScriptStep | undefined>();
   const [detailResult, setDetailResult] = useState<CallbotResult | undefined>();
@@ -102,6 +104,53 @@ export function CallbotPage() {
   );
 
   const simCustomer = state.customers.find((customer) => customer.id === simCustomerId) ?? state.customers[0];
+
+  // Nghe thử dùng giọng thật của trình duyệt (Web Speech API). Nếu máy không có
+  // giọng tiếng Việt, giao diện vẫn cho nghe bằng giọng sẵn có và nói rõ tên giọng.
+  const voiceProfile = useMemo(() => parseVoiceLabel(campaign?.voice ?? ""), [campaign?.voice]);
+
+  const speakStep = useCallback(
+    (step: CallbotScriptStep) => {
+      const segments = buildSpeechSegments([step], simCustomer, campaign);
+      const first = segments[0];
+      if (!first) {
+        dispatch({ type: "toast", message: `Bước "${step.label}" chưa có lời thoại để đọc`, tone: "warn" });
+        return;
+      }
+      if (!speech.speak(first.text, voiceProfile, step.id)) {
+        dispatch({ type: "toast", message: "Trình duyệt không hỗ trợ đọc tiếng nói", tone: "warn" });
+        return;
+      }
+      setPlaying(true);
+      dispatch({ type: "toast", message: `Đang nghe thử bước "${step.label}" với giọng ${campaign.voice}`, tone: "info" });
+    },
+    [simCustomer, campaign, voiceProfile, speech, dispatch],
+  );
+
+  const speakWholeScript = useCallback(() => {
+    const segments = buildSpeechSegments(campaign.script, simCustomer, campaign);
+    if (segments.length === 0) {
+      dispatch({ type: "toast", message: "Kịch bản chưa có lời thoại để đọc", tone: "warn" });
+      return;
+    }
+    if (!speech.speakSegments(segments, voiceProfile, "toan-bo", setStepIndex)) {
+      dispatch({ type: "toast", message: "Trình duyệt không hỗ trợ đọc tiếng nói", tone: "warn" });
+      return;
+    }
+    setPlaying(true);
+    dispatch({ type: "toast", message: "Đang phát thử kịch bản bằng giọng thật", tone: "info" });
+  }, [campaign, simCustomer, voiceProfile, speech, dispatch]);
+
+  const stopSpeaking = useCallback(() => {
+    speech.stop();
+    setPlaying(false);
+    dispatch({ type: "toast", message: "Đã dừng nghe thử", tone: "info" });
+  }, [speech, dispatch]);
+
+  // Đọc xong thì tự hạ cờ phát để nút trở lại trạng thái "Nghe thử".
+  useEffect(() => {
+    if (speech.speakingId === null) setPlaying(false);
+  }, [speech.speakingId]);
 
   // Dừng bộ đếm mô phỏng khi rời trang để không rò rỉ timer.
   useEffect(() => () => window.clearInterval(simTimer.current), []);
@@ -576,13 +625,12 @@ export function CallbotPage() {
                                   </button>
                                   <button
                                     type="button"
-                                    onClick={() => {
-                                      setStepIndex(index);
-                                      setPlaying(true);
-                                      dispatch({ type: "toast", message: `Đang nghe thử bước "${step.label}" với giọng ${campaign.voice}`, tone: "info" });
-                                    }}
-                                    className="grid h-8 w-8 place-items-center rounded-full bg-[#f1f5f8] text-[#0f8b98] transition hover:bg-[#e5f7f9]"
+                                    onClick={() => speakStep(step)}
+                                    className={`grid h-8 w-8 place-items-center rounded-full transition ${
+                                      speech.speakingId === step.id ? "bg-[#0f8b98] text-white" : "bg-[#f1f5f8] text-[#0f8b98] hover:bg-[#e5f7f9]"
+                                    }`}
                                     aria-label="Nghe thử"
+                                    title={speech.supported ? "Nghe thử bằng giọng trình duyệt" : "Trình duyệt không hỗ trợ đọc tiếng nói"}
                                   >
                                     <IconPlay size={14} />
                                   </button>
@@ -632,10 +680,7 @@ export function CallbotPage() {
                           <Button
                             size="sm"
                             variant="outline"
-                            onClick={() => {
-                              setPlaying((value) => !value);
-                              dispatch({ type: "toast", message: playing ? "Đã dừng nghe thử" : "Đang phát thử kịch bản", tone: "info" });
-                            }}
+                            onClick={() => (playing ? stopSpeaking() : speakWholeScript())}
                           >
                             {playing ? <IconPause size={14} /> : <IconPlay size={14} />} {playing ? "Dừng" : "Nghe thử toàn bộ"}
                           </Button>
@@ -643,6 +688,13 @@ export function CallbotPage() {
                             <IconMic size={14} /> Đổi giọng
                           </Button>
                         </div>
+                        <p className="mt-2 text-[11.5px] text-[#8492a0]">
+                          {speech.supported
+                            ? speech.voices.some((voice) => voice.lang.toLowerCase().startsWith("vi"))
+                              ? "Đang đọc bằng giọng tiếng Việt có sẵn trên thiết bị."
+                              : "Thiết bị chưa có giọng tiếng Việt; sẽ đọc bằng giọng gần nhất."
+                            : "Trình duyệt này không hỗ trợ đọc tiếng nói."}
+                        </p>
                       </div>
 
                       <div className="rounded-2xl border border-[#edf1f5] p-4">
@@ -991,36 +1043,71 @@ export function CallbotPage() {
         open={voiceOpen}
         title="Chọn giọng đọc cho trợ lý ảo"
         subtitle="Giọng đọc áp dụng cho toàn bộ cuộc gọi của chiến dịch này"
-        onClose={() => setVoiceOpen(false)}
+        onClose={() => {
+          speech.stop();
+          setVoiceOpen(false);
+        }}
         footer={
-          <Button variant="ghost" onClick={() => setVoiceOpen(false)}>
+          <Button
+            variant="ghost"
+            onClick={() => {
+              speech.stop();
+              setVoiceOpen(false);
+            }}
+          >
             Đóng
           </Button>
         }
       >
+        {!speech.supported ? (
+          <p className="mb-3 rounded-2xl bg-[#fdf1e0] px-3.5 py-3 text-[12.5px] leading-6 text-[#b45309]">
+            Trình duyệt này không hỗ trợ đọc tiếng nói, nên không nghe thử được. Vẫn có thể chọn giọng để lưu vào chiến dịch.
+          </p>
+        ) : null}
         <ul className="space-y-2.5">
           {VOICES.map((voice) => {
             const active = campaign.voice === voice;
+            const profile = parseVoiceLabel(voice);
+            const matched = speech.supported ? pickVoice(speech.voices, profile) : undefined;
+            const previewing = speech.speakingId === `preview-${voice}`;
             return (
-              <li key={voice}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    dispatch({ type: "updateCampaignVoice", id: campaign.id, voice });
-                    setVoiceOpen(false);
-                  }}
-                  className={`flex w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left transition ${
-                    active ? "border-[#0f8b98] bg-[#f2fbfc]" : "border-[#edf1f5] hover:border-[#bfe3e8]"
-                  }`}
-                >
+              <li key={voice} className={`rounded-2xl border px-4 py-3 transition ${active ? "border-[#0f8b98] bg-[#f2fbfc]" : "border-[#edf1f5]"}`}>
+                <div className="flex items-center justify-between gap-3">
                   <span className="flex items-center gap-3">
                     <span className="grid h-9 w-9 place-items-center rounded-full bg-[#e5f7f9] text-[#0f8b98]">
                       <IconMic size={16} />
                     </span>
-                    <span className="text-[13.5px] font-bold text-[#111a22]">{voice}</span>
+                    <span>
+                      <span className="block text-[13.5px] font-bold text-[#111a22]">{voice}</span>
+                      <span className="block text-[11.5px] text-[#8492a0]">
+                        {matched ? `Thiết bị đọc bằng: ${matched.name}` : "Chưa tìm thấy giọng phù hợp trên thiết bị"}
+                      </span>
+                    </span>
                   </span>
                   {active ? <Badge label="Đang dùng" color="#15803d" bg="#e7f7ec" /> : null}
-                </button>
+                </div>
+                <div className="mt-3 flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!speech.supported}
+                    onClick={() => {
+                      const preview = `Xin chào, tôi là ${voice.replace(/^Giọng\s+/, "")}. Đây là giọng đọc của trợ lý ảo Callio.`;
+                      speech.speak(preview, profile, `preview-${voice}`);
+                    }}
+                  >
+                    {previewing ? <IconPause size={14} /> : <IconPlay size={14} />} Nghe thử
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={active ? "ghost" : "primary"}
+                    onClick={() => {
+                      dispatch({ type: "updateCampaignVoice", id: campaign.id, voice });
+                    }}
+                  >
+                    {active ? "Đang dùng" : "Chọn giọng này"}
+                  </Button>
+                </div>
               </li>
             );
           })}

@@ -183,6 +183,24 @@ Các tác vụ thao tác cũng đi qua reducer thay vì chỉ báo toast:
 
 Workflow mới tạo được chèn lên đầu và tự chọn sẵn, cùng cách với chiến dịch Callbot.
 
+### Nghe thử giọng đọc (Web Speech API)
+
+Nút "Nghe thử" của từng bước và "Nghe thử toàn bộ" đọc thật bằng tổng hợp giọng nói
+của trình duyệt, không còn là toast giả.
+
+- `src/lib/speech.ts` là lớp thuần tách khỏi API để test được: `parseVoiceLabel` suy
+  giới tính/miền từ nhãn, `pickVoice` chọn giọng trình duyệt hợp nhất (ưu tiên tuyệt
+  đối giọng tiếng Việt; không có thì dùng giọng gần nhất), `buildSpeechSegments` điền
+  biến động theo khách đang xem trước.
+- Nhận diện giới tính phải kiểm tra **"nữ" trước "nam"**: "nam" vừa là giới tính vừa
+  nằm trong "miền Nam", nên đảo thứ tự sẽ đọc sai giọng nữ miền Nam.
+- Ưu tiên tiếng Việt chỉ nằm ở một chỗ (`pickVoice` lọc trước), không cộng điểm ở
+  `scoreVoice`, để không có hai nguồn cùng quyết định.
+- Hook `useSpeech` nạp giọng qua cả `getVoices()` lẫn sự kiện `voiceschanged` (Chrome
+  nạp bất đồng bộ), đọc tuần tự từng đoạn và huỷ khi rời trang.
+- Thiết bị/trình duyệt không hỗ trợ thì giao diện báo rõ và vẫn cho chọn giọng để lưu
+  vào chiến dịch, thay vì im lặng hoặc lỗi.
+
 ## Quy ước
 
 - Toàn bộ nội dung hiển thị cho người dùng là tiếng Việt. Slug route dùng dạng
