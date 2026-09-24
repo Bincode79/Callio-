@@ -193,6 +193,14 @@ export interface CallbotResult {
   recordingUrl?: string;
   qualityScore?: number;
   stepReached?: number;
+  /** Cuộc gọi bị quy tắc khung giờ chặn nên chưa hề thực hiện. */
+  blockedReason?: string;
+  /** Quy tắc chuyển nhân viên đã can thiệp trong cuộc gọi này. */
+  escalated?: boolean;
+  /** Khách đã yêu cầu không liên hệ lại. */
+  optedOut?: boolean;
+  /** SMS xác nhận đã gửi sau cuộc gọi. */
+  smsSent?: boolean;
 }
 
 export interface TelesalesTask {

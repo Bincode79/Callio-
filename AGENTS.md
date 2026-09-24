@@ -70,16 +70,28 @@ trang trí. Nhãn hiển thị nằm ở `CALLBOT_RULE_LABELS` (store) để toa
 dùng chung một nguồn.
 
 - Bật/tắt qua action `toggleCampaignRule`, sửa tham số qua `updateCampaignConfig`.
-- **`syncToCrm` là quy tắc duy nhất có hiệu lực thật hiện tại:** khi bật,
-  `recordCallResult` ghi một `TimelineEvent` vào `customer.timeline` và cập nhật
-  `lastContactAt`; khi tắt thì chỉ lưu kết quả vào chiến dịch, không đụng hồ sơ
-  khách hàng. Chiến dịch khảo sát mẫu cố ý đặt `syncToCrm: false` để có sẵn ca đối
-  chứng.
-- Các cờ còn lại (`quietHours`, `autoStopOptOut`, `escalateNegative`,
-  `sendConfirmSms`) mới chỉ có trạng thái và giao diện, **chưa được engine mô phỏng
-  đọc tới**. Cần nối vào `simulateCall` nếu muốn chúng thay đổi hành vi cuộc gọi.
+- **Cả 5 quy tắc đều được `simulateCall` đọc tới:**
+  - `quietHours` — chặn trước khi bấm số nếu ngoài khung giờ; trả về `blocked.reason`,
+    kết quả `hen-goi-lai`, không sinh hội thoại. Giao diện cũng cảnh báo trước bằng
+    `isWithinWindow` để người dùng không bấm rồi mới biết.
+  - `autoStopOptOut` — khách nói câu như "đừng gọi" thì ghi nhận `optedOut`, thêm
+    lời xin lỗi và dừng ngay; kết quả `tu-choi`.
+  - `escalateNegative` — khách từ chối thì nối máy chuyên viên thay vì kết thúc,
+    `escalated = true`, kết quả đổi thành `hen-goi-lai` (cần người thật gọi lại).
+  - `sendConfirmSms` — `smsSent` chỉ bật khi kết quả là `xac-nhan`.
+  - `syncToCrm` — ghi `TimelineEvent` vào `customer.timeline` và cập nhật
+    `lastContactAt`; tắt thì chỉ lưu kết quả vào chiến dịch.
+- Chiến dịch khảo sát mẫu cố ý đặt `syncToCrm: false` và `escalateNegative: false`
+  để có sẵn ca đối chứng trong dữ liệu.
 - Chiến dịch tạo mới mặc định bật các quy tắc an toàn nhưng để `syncToCrm: false`,
   vì ghi vào hồ sơ khách hàng nên do người dùng chủ động bật.
+- Cờ can thiệp được lưu vào `CallbotResult` (`blockedReason`, `escalated`,
+  `optedOut`, `smsSent`) nên xem lại kết quả vẫn biết quy tắc nào đã tác động.
+
+**Lưu ý khi viết test cho engine:** `hasOptedOut` chuẩn hoá cả từ khoá lẫn chuỗi
+đầu vào — chỉ chuẩn hoá một phía thì cụm còn dấu sẽ không bao giờ khớp. Và
+`quietHours` mặc định bật, nên test chạy ngoài giờ làm việc sẽ bị chặn hết; cần tắt
+cờ này cho các ca không kiểm tra khung giờ.
 
 Một lượt nói trong cuộc gọi là `CallbotTurn`. `CallbotResult` giữ thêm `turns`,
 `qualityScore`, `stepReached`, `recordingUrl` để xem lại hội thoại đầy đủ.

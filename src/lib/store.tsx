@@ -357,10 +357,19 @@ function reducer(state: AppState, action: Action): AppState {
         : state.customers;
 
       const syncNote = target.rules.syncToCrm ? " và đã ghi vào hành trình khách hàng" : "";
+      // Các quy tắc có thể can thiệp vào cuộc gọi, nên thông báo phải nói rõ
+      // chuyện gì đã xảy ra thay vì chỉ báo kết quả chung chung.
+      const ruleNotes: string[] = [];
+      if (result.blockedReason) ruleNotes.push(`chưa gọi được: ${result.blockedReason}`);
+      if (result.escalated) ruleNotes.push("đã chuyển chuyên viên");
+      if (result.optedOut) ruleNotes.push("khách yêu cầu không liên hệ lại");
+      if (result.smsSent) ruleNotes.push("đã gửi SMS xác nhận");
+      const ruleNote = ruleNotes.length > 0 ? ` (${ruleNotes.join(", ")})` : "";
+
       return nextToast(
         { ...state, callbotCampaigns, customers },
-        `Đã lưu kết quả cuộc gọi với ${customerName}: ${callbotOutcomeLabel(result.outcome)}${syncNote}`,
-        "success",
+        `Đã lưu kết quả cuộc gọi với ${customerName}: ${callbotOutcomeLabel(result.outcome)}${ruleNote}${syncNote}`,
+        result.blockedReason || result.optedOut ? "warn" : "success",
       );
     }
     case "updateCampaignConfig": {

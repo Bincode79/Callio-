@@ -157,7 +157,7 @@ const WEEKDAYS = ["CN", "T2", "T3", "T4", "T5", "T6", "T7"];
 
 // Sản phẩm phục vụ đội ngũ kinh doanh Việt Nam nên mọi mốc thời gian đều hiển thị
 // theo múi giờ ICT, bất kể người xem đang ở múi giờ nào.
-const TIME_ZONE = "Asia/Ho_Chi_Minh";
+export const TIME_ZONE = "Asia/Ho_Chi_Minh";
 
 const dateFormatter = new Intl.DateTimeFormat("vi-VN", {
   timeZone: TIME_ZONE,

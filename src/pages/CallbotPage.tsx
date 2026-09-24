@@ -10,7 +10,7 @@ import {
   relativeTime,
   sentimentMeta,
 } from "../lib/format";
-import { fillVariables, hasTerminalStep, resultFromSimulation, simulateCall, variablesInScript } from "../lib/callbot";
+import { fillVariables, hasTerminalStep, isWithinWindow, resultFromSimulation, simulateCall, variablesInScript } from "../lib/callbot";
 import { PageHeader } from "../components/AppShell";
 import {
   Avatar,
@@ -41,6 +41,7 @@ import {
   IconPlus,
   IconRobot,
   IconSparkle,
+  IconUsers,
 } from "../components/icons";
 import type { CallbotCampaign, CallbotResult, CallbotScriptStep } from "../lib/types";
 
@@ -62,6 +63,10 @@ const BRANCH_OPTIONS: Array<{ value: CallbotScriptStep["branch"]; label: string 
 
 // Khai báo tường minh để `Object.keys` không làm mất kiểu khoá của CallbotRules.
 const CALLBOT_RULE_KEYS = ["quietHours", "autoStopOptOut", "escalateNegative", "sendConfirmSms", "syncToCrm"] as const;
+
+// Các lượt nói sinh ra do quy tắc vận hành can thiệp, được đánh dấu riêng trong
+// hội thoại để người dùng phân biệt với lời thoại theo kịch bản.
+const RULE_TURN_INTENTS = new Set(["Chuyển nhân viên", "Ghi nhận không làm phiền"]);
 
 export function CallbotPage() {
   const { state, dispatch } = useApp();
@@ -153,8 +158,20 @@ export function CallbotPage() {
 
     const simulation = simulateCall(campaign, simCustomer, simVariant);
     setSimTurns([]);
-    setSimRunning(true);
 
+    // Cuộc gọi bị quy tắc khung giờ chặn thì không có hội thoại để diễn; ghi
+    // nhận ngay để người dùng thấy lý do thay vì màn hình trống.
+    if (simulation.blocked) {
+      setSimRunning(false);
+      dispatch({
+        type: "recordCallResult",
+        campaignId: campaign.id,
+        result: resultFromSimulation(campaign, simCustomer, simulation, 0),
+      });
+      return;
+    }
+
+    setSimRunning(true);
     let shown = 0;
     simTimer.current = window.setInterval(() => {
       shown += 1;
@@ -187,6 +204,10 @@ export function CallbotPage() {
   }, [campaign]);
 
   const previewSay = campaign && simCustomer && campaign.script[stepIndex] ? fillVariables(campaign.script[stepIndex].say, simCustomer, campaign) : "";
+
+  // Cho biết trước cuộc gọi có bị quy tắc khung giờ chặn hay không, thay vì để
+  // người dùng bấm rồi mới biết.
+  const outsideWindow = Boolean(campaign?.rules.quietHours) && campaign ? !isWithinWindow(campaign.windowStart, campaign.windowEnd) : false;
 
   return (
     <div className="space-y-6">
@@ -373,6 +394,16 @@ export function CallbotPage() {
                   </div>
                 ) : null}
 
+                {outsideWindow ? (
+                  <div className="mb-4 rounded-2xl border border-[#f3d9a4] bg-[#fdf7e8] p-4">
+                    <p className="text-[12.5px] font-black text-[#8a5b00]">Đang ngoài khung giờ cho phép</p>
+                    <p className="mt-1.5 text-[12.5px] text-[#8a5b00]">
+                      Quy tắc “Không gọi ngoài khung giờ cho phép” đang bật, và hiện tại chưa tới khung {campaign.windowStart} - {campaign.windowEnd}.
+                      Bấm “Bắt đầu gọi” sẽ bị chặn và ghi nhận là cần gọi lại. Tạm tắt quy tắc ở tab Cấu hình nếu muốn chạy thử ngay.
+                    </p>
+                  </div>
+                ) : null}
+
                 <div className="grid gap-5 lg:grid-cols-[1fr_300px]">
                   <div className="rounded-2xl bg-[#fbfdfe] p-4">
                     <div className="mb-3 flex items-center justify-between">
@@ -419,6 +450,9 @@ export function CallbotPage() {
                                     color={sentimentMeta[turn.sentiment].color}
                                     bg={sentimentMeta[turn.sentiment].bg}
                                   />
+                                ) : null}
+                                {turn.intent && RULE_TURN_INTENTS.has(turn.intent) ? (
+                                  <Badge label={turn.intent} color="#7c3aed" bg="#f1ebfe" />
                                 ) : null}
                               </p>
                             </div>
@@ -1159,6 +1193,37 @@ export function CallbotPage() {
               <KeyValue label="Thời điểm gọi" value={relativeTime(detailResult.at)} />
               <KeyValue label="Bản ghi âm" value={detailResult.recordingUrl ? "Đã lưu, mã hoá AES-256" : "Không có bản ghi"} />
             </div>
+
+            {detailResult.blockedReason ||
+            detailResult.escalated ||
+            detailResult.optedOut ||
+            detailResult.smsSent ? (
+              <div className="rounded-2xl border border-[#edf1f5] p-4">
+                <p className="text-[12px] font-bold uppercase tracking-[0.06em] text-[#8492a0]">Quy tắc vận hành đã can thiệp</p>
+                <ul className="mt-3 space-y-2">
+                  {detailResult.blockedReason ? (
+                    <li className="flex items-start gap-2 text-[12.5px] font-semibold text-[#b45309]">
+                      <IconClock size={14} /> Chưa gọi được: {detailResult.blockedReason}
+                    </li>
+                  ) : null}
+                  {detailResult.escalated ? (
+                    <li className="flex items-start gap-2 text-[12.5px] font-semibold text-[#7c3aed]">
+                      <IconUsers size={14} /> Đã chuyển sang chuyên viên phụ trách
+                    </li>
+                  ) : null}
+                  {detailResult.optedOut ? (
+                    <li className="flex items-start gap-2 text-[12.5px] font-semibold text-[#be123c]">
+                      <IconClose size={14} /> Khách yêu cầu không liên hệ lại
+                    </li>
+                  ) : null}
+                  {detailResult.smsSent ? (
+                    <li className="flex items-start gap-2 text-[12.5px] font-semibold text-[#15803d]">
+                      <IconCheck size={14} /> Đã gửi SMS xác nhận sau cuộc gọi
+                    </li>
+                  ) : null}
+                </ul>
+              </div>
+            ) : null}
           </div>
         ) : null}
       </Modal>
