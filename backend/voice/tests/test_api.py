@@ -1,0 +1,740 @@
+"""Test API giọng nói bằng `unittest` có sẵn trong Python (không thêm runner).
+
+Engine được tiêm bản giả nên test không cần mạng, không cần model và chạy nhanh.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import unittest
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+from app.config import Settings
+from app.engines import Engines, build_engines, wrap_tts_cache
+from app.main import MAX_TTS_CHARS, create_app
+from app.providers import OpenAICompatibleStt, OpenAICompatibleTts
+from app.clientid import parse_forwarded_for, resolve_client_ip
+from app.ratelimit import TokenBucketLimiter
+from app.ttscache import CachedTtsEngine, TtsCache, ttsCacheKey
+from app.voices import VOICE_FEMALE, VOICE_MALE, resolve_voice
+
+
+class FakeTts:
+    """Trả dữ liệu cố định và ghi lại tham số nhận được để khẳng định."""
+
+    def __init__(self, payload: bytes = b"MP3DATA", chunks: list[bytes] | None = None) -> None:
+        self.payload = payload
+        # Mặc định phát hai đoạn để kiểm tra gộp/streaming liền mạch.
+        self.chunks = chunks if chunks is not None else [b"PART1", b"PART2"]
+        self.calls: list[tuple[str, str]] = []
+
+    async def synthesize(self, text: str, voice: str) -> bytes:
+        self.calls.append((text, voice))
+        return self.payload
+
+    async def stream(self, text: str, voice: str):
+        self.calls.append((text, voice))
+        for chunk in self.chunks:
+            yield chunk
+
+
+class FakeStt:
+    def __init__(self, text: str = "Dạ đúng rồi em") -> None:
+        self.text = text
+        self.calls: list[tuple[bytes, str]] = []
+
+    def transcribe(self, audio: bytes, language: str) -> str:
+        self.calls.append((audio, language))
+        return self.text
+
+
+def build_client(tts: FakeTts | None = None, stt: FakeStt | None = None, **settings_kwargs):
+    settings = Settings(**settings_kwargs)
+    engines = Engines(tts=tts or FakeTts(), stt=stt or FakeStt())
+    app = create_app(settings=settings, engines=engines)
+    return TestClient(app), engines
+
+
+class ResolveVoiceTests(unittest.TestCase):
+    def test_maps_female_labels(self):
+        self.assertEqual(resolve_voice("Giọng nữ miền Bắc - Linh An"), VOICE_FEMALE)
+        self.assertEqual(resolve_voice("Giọng nữ miền Nam - Thuỳ Dương"), VOICE_FEMALE)
+
+    def test_maps_male_labels(self):
+        self.assertEqual(resolve_voice("Giọng nam miền Nam - Minh Khang"), VOICE_MALE)
+        self.assertEqual(resolve_voice("Giọng nam miền Bắc - Đức Thịnh"), VOICE_MALE)
+
+    def test_checks_female_before_male_in_free_text(self):
+        # "nam" nằm trong "miền Nam" nên nếu xét trước sẽ nhận sai giới tính.
+        self.assertEqual(resolve_voice("Giọng nữ miền Nam mới"), VOICE_FEMALE)
+
+    def test_falls_back_for_unknown_label(self):
+        self.assertEqual(resolve_voice("Giọng đặc biệt"), VOICE_FEMALE)
+        self.assertEqual(resolve_voice(None, fallback=VOICE_MALE), VOICE_MALE)
+
+
+class HealthTests(unittest.TestCase):
+    def test_health_reports_config(self):
+        client, _ = build_client(voice=VOICE_MALE, whisper_model="tiny")
+        body = client.get("/api/health").json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["voice"], VOICE_MALE)
+        self.assertEqual(body["whisperModel"], "tiny")
+
+
+class TtsTests(unittest.TestCase):
+    def test_returns_audio_with_resolved_voice(self):
+        tts = FakeTts(payload=b"abc123")
+        client, _ = build_client(tts=tts)
+        response = client.post("/api/tts", data={"text": "Xin chào", "voice": "Giọng nam miền Nam - Minh Khang"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "audio/mpeg")
+        self.assertEqual(response.content, b"abc123")
+        self.assertEqual(tts.calls, [("Xin chào", VOICE_MALE)])
+
+    def test_uses_default_voice_when_voice_missing(self):
+        tts = FakeTts()
+        client, _ = build_client(tts=tts, voice=VOICE_FEMALE)
+        client.post("/api/tts", data={"text": "Xin chào"})
+        self.assertEqual(tts.calls[0][1], VOICE_FEMALE)
+
+    def test_rejects_empty_text(self):
+        tts = FakeTts()
+        client, _ = build_client(tts=tts)
+        response = client.post("/api/tts", data={"text": "   "})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(tts.calls, [], "không được gọi engine khi văn bản trống")
+
+    def test_rejects_text_over_limit(self):
+        tts = FakeTts()
+        client, _ = build_client(tts=tts)
+        response = client.post("/api/tts", data={"text": "a" * (MAX_TTS_CHARS + 1)})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(tts.calls, [])
+
+
+class SttTests(unittest.TestCase):
+    def test_transcribes_uploaded_audio(self):
+        stt = FakeStt(text="khách xác nhận")
+        client, _ = build_client(stt=stt)
+        response = client.post("/api/stt", files={"audio": ("a.mp3", b"AUDIO", "audio/mpeg")})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["text"], "khách xác nhận")
+        self.assertEqual(stt.calls, [(b"AUDIO", "vi")])
+
+    def test_rejects_empty_audio(self):
+        stt = FakeStt()
+        client, _ = build_client(stt=stt)
+        response = client.post("/api/stt", files={"audio": ("a.mp3", b"", "audio/mpeg")})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(stt.calls, [])
+
+    def test_rejects_oversized_audio(self):
+        stt = FakeStt()
+        client, _ = build_client(stt=stt, max_audio_bytes=4)
+        response = client.post("/api/stt", files={"audio": ("a.mp3", b"12345", "audio/mpeg")})
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(stt.calls, [])
+
+
+class FakeHttpResponse:
+    def __init__(self, content=b"", json_body=None, status_code=200):
+        self.content = content
+        self._json = json_body
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return self._json
+
+
+class FakeHttpClient:
+    """Ghi lại request và trả phản hồi dựng sẵn, để test provider không cần mạng."""
+
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    def post(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.response
+
+
+class OpenAiCompatibleTtsTests(unittest.TestCase):
+    def test_posts_openai_speech_payload(self):
+        client = FakeHttpClient(FakeHttpResponse(content=b"AUDIO"))
+        provider = OpenAICompatibleTts("http://tts.local/", "vieneu", api_key="secret", client=client)
+
+        import asyncio
+
+        audio = asyncio.run(provider.synthesize("Xin chào", VOICE_FEMALE))
+
+        self.assertEqual(audio, b"AUDIO")
+        url, kwargs = client.calls[0]
+        self.assertEqual(url, "http://tts.local/v1/audio/speech", "phải bỏ dấu / thừa ở base_url")
+        self.assertEqual(kwargs["json"]["input"], "Xin chào")
+        self.assertEqual(kwargs["json"]["voice"], VOICE_FEMALE)
+        self.assertEqual(kwargs["json"]["model"], "vieneu")
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer secret")
+
+    def test_voice_override_wins(self):
+        client = FakeHttpClient(FakeHttpResponse(content=b"AUDIO"))
+        provider = OpenAICompatibleTts("http://tts.local", "m", client=client, voice_override="giong-rieng")
+
+        import asyncio
+
+        asyncio.run(provider.synthesize("x", VOICE_FEMALE))
+        self.assertEqual(client.calls[0][1]["json"]["voice"], "giong-rieng")
+
+    def test_empty_audio_raises(self):
+        client = FakeHttpClient(FakeHttpResponse(content=b""))
+        provider = OpenAICompatibleTts("http://tts.local", "m", client=client)
+        import asyncio
+
+        with self.assertRaises(RuntimeError):
+            asyncio.run(provider.synthesize("x", VOICE_FEMALE))
+
+    def test_no_auth_header_when_no_key(self):
+        client = FakeHttpClient(FakeHttpResponse(content=b"AUDIO"))
+        provider = OpenAICompatibleTts("http://tts.local", "m", client=client)
+        import asyncio
+
+        asyncio.run(provider.synthesize("x", VOICE_FEMALE))
+        self.assertNotIn("Authorization", client.calls[0][1]["headers"])
+
+
+class OpenAiCompatibleSttTests(unittest.TestCase):
+    def test_posts_transcription_and_reads_text(self):
+        client = FakeHttpClient(FakeHttpResponse(json_body={"text": "dạ đúng rồi"}))
+        provider = OpenAICompatibleStt("http://stt.local/", "phowhisper", api_key="k", client=client)
+
+        text = provider.transcribe(b"AUDIO", "vi")
+
+        self.assertEqual(text, "dạ đúng rồi")
+        url, kwargs = client.calls[0]
+        self.assertEqual(url, "http://stt.local/v1/audio/transcriptions")
+        self.assertEqual(kwargs["data"]["model"], "phowhisper")
+        self.assertEqual(kwargs["data"]["language"], "vi")
+        self.assertIn("file", kwargs["files"])
+
+    def test_missing_text_field_raises(self):
+        client = FakeHttpClient(FakeHttpResponse(json_body={"error": "no text"}))
+        provider = OpenAICompatibleStt("http://stt.local", "m", client=client)
+        with self.assertRaises(RuntimeError):
+            provider.transcribe(b"AUDIO", "vi")
+
+
+class BuildEnginesTests(unittest.TestCase):
+    def test_defaults_to_local_engines(self):
+        engines = build_engines(Settings())
+        self.assertEqual(type(engines.tts).__name__, "EdgeTtsEngine")
+        self.assertEqual(type(engines.stt).__name__, "FasterWhisperEngine")
+
+    def test_builds_openai_tts(self):
+        engines = build_engines(Settings(tts_provider="openai", tts_base_url="http://tts.local", tts_model="vieneu"))
+        self.assertEqual(type(engines.tts).__name__, "OpenAICompatibleTts")
+
+    def test_builds_openai_stt(self):
+        engines = build_engines(Settings(stt_provider="openai", stt_base_url="http://stt.local", stt_model="phowhisper"))
+        self.assertEqual(type(engines.stt).__name__, "OpenAICompatibleStt")
+
+    def test_openai_without_base_url_fails_fast(self):
+        with self.assertRaises(ValueError) as ctx:
+            build_engines(Settings(tts_provider="openai"))
+        self.assertIn("CALLIO_TTS_BASE_URL", str(ctx.exception))
+
+    def test_rejects_unknown_provider(self):
+        with self.assertRaises(ValueError):
+            build_engines(Settings(tts_provider="lo-lang"))
+
+
+class AuthTests(unittest.TestCase):
+    def test_request_without_token_is_rejected_when_configured(self):
+        tts = FakeTts()
+        client, _ = build_client(tts=tts, auth_token="s3cret")
+        response = client.post("/api/tts", data={"text": "Xin chào"})
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(tts.calls, [], "không được gọi engine khi thiếu token")
+
+    def test_request_with_wrong_token_is_rejected(self):
+        tts = FakeTts()
+        client, _ = build_client(tts=tts, auth_token="s3cret")
+        response = client.post("/api/tts", data={"text": "Xin chào"}, headers={"Authorization": "Bearer sai"})
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(tts.calls, [])
+
+    def test_request_with_correct_token_passes(self):
+        tts = FakeTts()
+        client, _ = build_client(tts=tts, auth_token="s3cret")
+        response = client.post("/api/tts", data={"text": "Xin chào"}, headers={"Authorization": "Bearer s3cret"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(tts.calls), 1)
+
+    def test_stt_also_requires_token(self):
+        stt = FakeStt()
+        client, _ = build_client(stt=stt, auth_token="s3cret")
+        response = client.post("/api/stt", files={"audio": ("a.mp3", b"AUDIO", "audio/mpeg")})
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(stt.calls, [])
+
+    def test_no_token_configured_means_open_access(self):
+        client, _ = build_client()
+        self.assertEqual(client.post("/api/tts", data={"text": "Xin chào"}).status_code, 200)
+
+    def test_health_reports_auth_and_providers(self):
+        client, _ = build_client(auth_token="s3cret", tts_provider="openai", stt_provider="openai")
+        body = client.get("/api/health").json()
+        self.assertTrue(body["authRequired"])
+        self.assertEqual(body["ttsProvider"], "openai")
+        self.assertEqual(body["sttProvider"], "openai")
+
+
+class TtsStreamTests(unittest.TestCase):
+    def test_streams_chunks_in_order(self):
+        tts = FakeTts(chunks=[b"AA", b"BB", b"CC"])
+        client, _ = build_client(tts=tts)
+        response = client.post("/api/tts/stream", data={"text": "Xin chào"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "audio/mpeg")
+        self.assertEqual(response.content, b"AABBCC", "các đoạn phải nối đúng thứ tự")
+
+    def test_stream_resolves_voice_like_tts(self):
+        tts = FakeTts()
+        client, _ = build_client(tts=tts)
+        client.post("/api/tts/stream", data={"text": "Xin chào", "voice": "Giọng nam miền Nam - Minh Khang"})
+        self.assertEqual(tts.calls, [("Xin chào", VOICE_MALE)])
+
+    def test_stream_rejects_empty_text(self):
+        tts = FakeTts()
+        client, _ = build_client(tts=tts)
+        response = client.post("/api/tts/stream", data={"text": "  "})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(tts.calls, [], "không được gọi engine khi văn bản trống")
+
+    def test_stream_rejects_over_limit(self):
+        tts = FakeTts()
+        client, _ = build_client(tts=tts)
+        response = client.post("/api/tts/stream", data={"text": "a" * (MAX_TTS_CHARS + 1)})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(tts.calls, [])
+
+    def test_stream_requires_token_when_configured(self):
+        tts = FakeTts()
+        client, _ = build_client(tts=tts, auth_token="s3cret")
+        response = client.post("/api/tts/stream", data={"text": "Xin chào"})
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(tts.calls, [])
+
+    def test_stream_accepts_correct_token(self):
+        tts = FakeTts()
+        client, _ = build_client(tts=tts, auth_token="s3cret")
+        response = client.post("/api/tts/stream", data={"text": "Xin chào"}, headers={"Authorization": "Bearer s3cret"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"PART1PART2")
+
+
+class FakeClock:
+    """Đồng hồ điều khiển được để test giới hạn tần suất mà không cần sleep."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class TokenBucketLimiterTests(unittest.TestCase):
+    def test_allows_up_to_capacity(self):
+        clock = FakeClock()
+        limiter = TokenBucketLimiter(capacity=3, window_seconds=60, clock=clock)
+
+        results = [limiter.allow("a") for _ in range(4)]
+        self.assertEqual(results, [True, True, True, False], "request thứ tư vượt hạn mức")
+
+    def test_disabled_when_capacity_zero(self):
+        limiter = TokenBucketLimiter(capacity=0, window_seconds=60, clock=FakeClock())
+        self.assertFalse(limiter.enabled)
+        self.assertTrue(all(limiter.allow("a") for _ in range(100)))
+
+    def test_separate_keys_have_separate_buckets(self):
+        limiter = TokenBucketLimiter(capacity=1, window_seconds=60, clock=FakeClock())
+        self.assertTrue(limiter.allow("a"))
+        self.assertFalse(limiter.allow("a"))
+        self.assertTrue(limiter.allow("b"), "khoá khác phải có hạn mức riêng")
+
+    def test_refills_over_time(self):
+        clock = FakeClock()
+        limiter = TokenBucketLimiter(capacity=2, window_seconds=60, clock=clock)
+        self.assertTrue(limiter.allow("a"))
+        self.assertTrue(limiter.allow("a"))
+        self.assertFalse(limiter.allow("a"), "đã cạn token")
+
+        # Nửa cửa sổ -> nạp lại 1 token.
+        clock.advance(30)
+        self.assertTrue(limiter.allow("a"))
+        self.assertFalse(limiter.allow("a"), "chỉ đủ cho một request")
+
+    def test_never_exceeds_capacity_after_long_idle(self):
+        clock = FakeClock()
+        limiter = TokenBucketLimiter(capacity=2, window_seconds=60, clock=clock)
+        limiter.allow("a")
+        clock.advance(10_000)
+        # Dù chờ rất lâu, vẫn không vượt quá capacity.
+        results = [limiter.allow("a") for _ in range(3)]
+        self.assertEqual(results, [True, True, False])
+
+    def test_retry_after_reports_wait(self):
+        clock = FakeClock()
+        limiter = TokenBucketLimiter(capacity=1, window_seconds=60, clock=clock)
+        limiter.allow("a")
+        self.assertFalse(limiter.allow("a"))
+        # Cần 1 token, nạp 1 token/60s -> chờ khoảng 60 giây.
+        self.assertGreaterEqual(limiter.retry_after("a"), 1)
+        self.assertLessEqual(limiter.retry_after("a"), 60)
+
+    def test_retry_after_is_zero_when_available(self):
+        limiter = TokenBucketLimiter(capacity=5, window_seconds=60, clock=FakeClock())
+        self.assertEqual(limiter.retry_after("chua-dung"), 0)
+
+    def test_cost_can_be_greater_than_one(self):
+        limiter = TokenBucketLimiter(capacity=3, window_seconds=60, clock=FakeClock())
+        self.assertTrue(limiter.allow("a", cost=3))
+        self.assertFalse(limiter.allow("a", cost=1))
+
+    def test_reset_clears_buckets(self):
+        limiter = TokenBucketLimiter(capacity=1, window_seconds=60, clock=FakeClock())
+        limiter.allow("a")
+        self.assertFalse(limiter.allow("a"))
+        limiter.reset()
+        self.assertTrue(limiter.allow("a"))
+
+
+class RateLimitEndpointTests(unittest.TestCase):
+    def build(self, **settings_kwargs):
+        settings = Settings(**settings_kwargs)
+        engines = Engines(tts=FakeTts(), stt=FakeStt())
+        clock = FakeClock()
+        tts_limiter = TokenBucketLimiter(settings.rate_limit_tts, settings.rate_limit_window_seconds, clock)
+        stt_limiter = TokenBucketLimiter(settings.rate_limit_stt, settings.rate_limit_window_seconds, clock)
+        app = create_app(settings=settings, engines=engines, tts_limiter=tts_limiter, stt_limiter=stt_limiter)
+        return TestClient(app), clock
+
+    def test_tts_returns_429_with_retry_after_when_exhausted(self):
+        client, _ = self.build(rate_limit_tts=2)
+        self.assertEqual(client.post("/api/tts", data={"text": "a"}).status_code, 200)
+        self.assertEqual(client.post("/api/tts", data={"text": "a"}).status_code, 200)
+
+        response = client.post("/api/tts", data={"text": "a"})
+        self.assertEqual(response.status_code, 429)
+        self.assertIn("Retry-After", response.headers)
+        self.assertIn("thử lại sau", response.json()["detail"])
+
+    def test_tts_and_stt_have_separate_limits(self):
+        client, _ = self.build(rate_limit_tts=1, rate_limit_stt=5)
+        self.assertEqual(client.post("/api/tts", data={"text": "a"}).status_code, 200)
+        self.assertEqual(client.post("/api/tts", data={"text": "a"}).status_code, 429)
+        # Hạn mức TTS cạn không được ảnh hưởng STT.
+        response = client.post("/api/stt", files={"audio": ("a.mp3", b"AUDIO", "audio/mpeg")})
+        self.assertEqual(response.status_code, 200)
+
+    def test_stt_returns_429_when_exhausted(self):
+        client, _ = self.build(rate_limit_stt=1)
+        self.assertEqual(client.post("/api/stt", files={"audio": ("a.mp3", b"AUDIO", "audio/mpeg")}).status_code, 200)
+        self.assertEqual(client.post("/api/stt", files={"audio": ("a.mp3", b"AUDIO", "audio/mpeg")}).status_code, 429)
+
+    def test_limit_refills_after_window(self):
+        client, clock = self.build(rate_limit_tts=1, rate_limit_window_seconds=60)
+        self.assertEqual(client.post("/api/tts", data={"text": "a"}).status_code, 200)
+        self.assertEqual(client.post("/api/tts", data={"text": "a"}).status_code, 429)
+
+        clock.advance(61)
+        self.assertEqual(client.post("/api/tts", data={"text": "a"}).status_code, 200)
+
+    def test_stream_endpoint_shares_tts_limit(self):
+        client, _ = self.build(rate_limit_tts=1)
+        self.assertEqual(client.post("/api/tts/stream", data={"text": "a"}).status_code, 200)
+        # Dùng chung hạn mức nên /api/tts bị chặn luôn.
+        self.assertEqual(client.post("/api/tts", data={"text": "a"}).status_code, 429)
+
+    def test_health_reports_rate_limit(self):
+        client, _ = self.build(rate_limit_tts=7, rate_limit_stt=3)
+        body = client.get("/api/health").json()
+        self.assertEqual(body["rateLimit"]["tts"], 7)
+        self.assertEqual(body["rateLimit"]["stt"], 3)
+
+
+class ResolveClientIpTests(unittest.TestCase):
+    TRUSTED = frozenset({"10.0.0.1", "10.0.0.2"})
+
+    def test_ignores_forwarded_header_from_untrusted_peer(self):
+        # Kẻ tấn công tự đặt X-Forwarded-For để né hạn mức; phải bị bỏ qua.
+        ip = resolve_client_ip("203.0.113.9", "1.2.3.4", self.TRUSTED)
+        self.assertEqual(ip, "203.0.113.9")
+
+    def test_uses_forwarded_header_from_trusted_proxy(self):
+        ip = resolve_client_ip("10.0.0.1", "203.0.113.9", self.TRUSTED)
+        self.assertEqual(ip, "203.0.113.9", "sau proxy tin cậy thì lấy IP người dùng thật")
+
+    def test_skips_trailing_trusted_proxies(self):
+        # Chuỗi thật: client, proxy1(tin cậy). IP ngoài cùng bên phải không tin cậy là client.
+        ip = resolve_client_ip("10.0.0.2", "203.0.113.9, 10.0.0.1", self.TRUSTED)
+        self.assertEqual(ip, "203.0.113.9")
+
+    def test_all_trusted_chain_falls_back_to_peer(self):
+        ip = resolve_client_ip("10.0.0.1", "10.0.0.2, 10.0.0.1", self.TRUSTED)
+        self.assertEqual(ip, "10.0.0.1", "không tìm được client thật thì dùng IP kết nối")
+
+    def test_no_trusted_proxies_means_header_never_used(self):
+        ip = resolve_client_ip("203.0.113.9", "1.2.3.4", frozenset())
+        self.assertEqual(ip, "203.0.113.9")
+
+    def test_missing_peer_is_unknown(self):
+        self.assertEqual(resolve_client_ip(None, "1.2.3.4", self.TRUSTED), "unknown")
+
+    def test_parse_forwarded_for_trims_and_drops_empty(self):
+        self.assertEqual(parse_forwarded_for(" 1.1.1.1 , , 2.2.2.2 "), ["1.1.1.1", "2.2.2.2"])
+        self.assertEqual(parse_forwarded_for(None), [])
+        self.assertEqual(parse_forwarded_for(""), [])
+
+
+class RateLimitKeyTests(unittest.TestCase):
+    def build(self, **settings_kwargs):
+        settings = Settings(**settings_kwargs)
+        engines = Engines(tts=FakeTts(), stt=FakeStt())
+        clock = FakeClock()
+        tts_limiter = TokenBucketLimiter(settings.rate_limit_tts, settings.rate_limit_window_seconds, clock)
+        stt_limiter = TokenBucketLimiter(settings.rate_limit_stt, settings.rate_limit_window_seconds, clock)
+        app = create_app(settings=settings, engines=engines, tts_limiter=tts_limiter, stt_limiter=stt_limiter)
+        return TestClient(app), tts_limiter
+
+    def test_spoofed_forwarded_for_cannot_bypass_limit(self):
+        # Không cấu hình proxy tin cậy: mọi header X-Forwarded-For khác nhau phải
+        # dùng chung một hạn mức theo IP kết nối thật.
+        client, _ = self.build(rate_limit_tts=1)
+        first = client.post("/api/tts", data={"text": "a"}, headers={"X-Forwarded-For": "1.1.1.1"})
+        self.assertEqual(first.status_code, 200)
+
+        second = client.post("/api/tts", data={"text": "a"}, headers={"X-Forwarded-For": "9.9.9.9"})
+        self.assertEqual(second.status_code, 429, "đổi header giả không được né hạn mức")
+
+    def test_trusted_proxy_separates_real_clients(self):
+        client, _ = self.build(rate_limit_tts=1, trusted_proxies=frozenset({"testclient"}))
+        first = client.post("/api/tts", data={"text": "a"}, headers={"X-Forwarded-For": "1.1.1.1"})
+        self.assertEqual(first.status_code, 200)
+
+        # Cùng proxy nhưng khác người dùng thật -> hạn mức riêng.
+        other = client.post("/api/tts", data={"text": "a"}, headers={"X-Forwarded-For": "2.2.2.2"})
+        self.assertEqual(other.status_code, 200)
+
+        # Quay lại người dùng đầu -> đã cạn.
+        again = client.post("/api/tts", data={"text": "a"}, headers={"X-Forwarded-For": "1.1.1.1"})
+        self.assertEqual(again.status_code, 429)
+
+
+class LimiterEvictionTests(unittest.TestCase):
+    def test_bucket_count_stays_bounded(self):
+        limiter = TokenBucketLimiter(capacity=1, window_seconds=60, clock=FakeClock(), max_keys=5)
+        # Nhiều IP khác nhau, mỗi IP gọi 1 lần (bucket đầy sau khi nạp lại).
+        for i in range(50):
+            limiter.allow(f"tts:10.0.0.{i}")
+        self.assertLessEqual(len(limiter._buckets), 5 + 1, "số bucket phải bị chặn trần")
+
+    def test_eviction_prefers_full_buckets_so_throttled_client_stays_blocked(self):
+        clock = FakeClock()
+        # Đủ chỗ cho nhiều bucket chưa bị tiêu, nên giai đoạn 1 dọn được mà không cần LRU.
+        limiter = TokenBucketLimiter(capacity=1, window_seconds=60, clock=clock, max_keys=3)
+        self.assertTrue(limiter.allow("tts:A"))
+        self.assertFalse(limiter.allow("tts:A"))
+
+        # Các IP mới đều gọi 1 lần -> bucket của chúng vẫn đầy, là ứng viên dọn trước.
+        for i in range(3):
+            limiter.allow(f"tts:new-{i}")
+
+        self.assertFalse(limiter.allow("tts:A"), "bucket đã cạn không được ưu tiên dọn")
+
+    def test_eviction_under_extreme_pressure_is_documented_tradeoff(self):
+        # Khi MỌI bucket đều đang bị tiêu và vượt trần, limiter chọn bảo vệ bộ nhớ:
+        # bucket cũ nhất bị xoá, nghĩa là client đó có thể được cấp lại hạn mức.
+        # Đây là đánh đổi có ý thức, được ghi rõ trong docstring của limiter.
+        clock = FakeClock()
+        limiter = TokenBucketLimiter(capacity=1, window_seconds=60, clock=clock, max_keys=2)
+        self.assertTrue(limiter.allow("tts:A"))
+        self.assertFalse(limiter.allow("tts:A"))
+
+        for i in range(5):
+            limiter.allow(f"tts:busy-{i}")
+            # Giữ mỗi bucket đều cạn bằng cách gọi lần hai.
+            limiter.allow(f"tts:busy-{i}")
+
+        self.assertLessEqual(len(limiter._buckets), 2 + 1, "bộ nhớ vẫn bị chặn trần")
+
+
+class RunScriptTests(unittest.TestCase):
+    def test_uvicorn_disables_proxy_headers(self):
+        # uvicorn mặc định bật --proxy-headers và tin loopback, nên nó ghi đè
+        # request.client.host bằng X-Forwarded-For trước khi app chạy. Nếu cờ này biến
+        # mất, kẻ gửi tự đặt header sẽ né được giới hạn tần suất (đã từng xảy ra thật).
+        script = (Path(__file__).resolve().parent.parent / "run.sh").read_text(encoding="utf-8")
+        self.assertIn("--no-proxy-headers", script)
+
+
+class TtsCacheTests(unittest.TestCase):
+    def test_stores_and_returns_by_key(self):
+        cache = TtsCache(max_entries=4)
+        cache.set(ttsCacheKey("Xin chào", "A"), b"AUDIO")
+        self.assertEqual(cache.get(ttsCacheKey("Xin chào", "A")), b"AUDIO")
+
+    def test_key_includes_voice(self):
+        self.assertNotEqual(ttsCacheKey("Xin chào", "A"), ttsCacheKey("Xin chào", "B"))
+
+    def test_key_normalises_whitespace(self):
+        self.assertEqual(ttsCacheKey("  Xin chào  ", " A "), ttsCacheKey("Xin chào", "A"))
+
+    def test_evicts_oldest_when_over_entries(self):
+        cache = TtsCache(max_entries=2)
+        cache.set("a", b"1")
+        cache.set("b", b"2")
+        cache.set("c", b"3")
+        self.assertIsNone(cache.get("a"), "mục cũ nhất phải bị loại")
+        self.assertEqual(cache.get("c"), b"3")
+
+    def test_get_touches_entry_so_it_survives(self):
+        cache = TtsCache(max_entries=2)
+        cache.set("a", b"1")
+        cache.set("b", b"2")
+        cache.get("a")
+        cache.set("c", b"3")
+        self.assertEqual(cache.get("a"), b"1", "mục vừa đọc không được bị loại")
+        self.assertIsNone(cache.get("b"), "mục cũ nhất bị loại")
+
+    def test_evicts_when_over_bytes(self):
+        cache = TtsCache(max_entries=10, max_bytes=5)
+        cache.set("a", b"1234")
+        cache.set("b", b"5678")
+        # Tổng vượt 5 byte nên mục cũ bị loại để giữ hạn mức.
+        self.assertIsNone(cache.get("a"))
+        self.assertEqual(cache.get("b"), b"5678")
+        self.assertLessEqual(cache.bytes_used, 5)
+
+    def test_skips_entry_larger_than_total_budget(self):
+        cache = TtsCache(max_entries=10, max_bytes=4)
+        cache.set("big", b"12345")
+        self.assertIsNone(cache.get("big"), "mục lớn hơn hạn mức thì không đệm")
+        self.assertEqual(cache.size, 0)
+
+    def test_disabled_cache_never_stores(self):
+        cache = TtsCache(max_entries=0)
+        self.assertFalse(cache.enabled)
+        cache.set("a", b"1")
+        self.assertIsNone(cache.get("a"))
+
+    def test_tracks_hits_and_misses(self):
+        cache = TtsCache(max_entries=2)
+        cache.get("missing")
+        cache.set("a", b"1")
+        cache.get("a")
+        stats = cache.stats()
+        self.assertEqual(stats["hits"], 1)
+        self.assertEqual(stats["misses"], 1)
+        self.assertEqual(stats["hitRate"], 50)
+        self.assertEqual(stats["entries"], 1)
+
+    def test_hit_rate_is_zero_without_requests(self):
+        self.assertEqual(TtsCache(max_entries=2).stats()["hitRate"], 0)
+
+
+class CachedTtsEngineTests(unittest.TestCase):
+    def test_second_synthesize_uses_cache_not_inner_engine(self):
+        inner = FakeTts(payload=b"AUDIO")
+        cache = TtsCache(max_entries=4)
+        engine = CachedTtsEngine(inner, cache)
+
+        first = asyncio.run(engine.synthesize("Xin chào", VOICE_FEMALE))
+        second = asyncio.run(engine.synthesize("Xin chào", VOICE_FEMALE))
+
+        self.assertEqual(first, b"AUDIO")
+        self.assertEqual(second, b"AUDIO")
+        self.assertEqual(len(inner.calls), 1, "lần thứ hai phải lấy từ đệm, không gọi lại engine")
+
+    def test_different_voice_is_cached_separately(self):
+        inner = FakeTts(payload=b"AUDIO")
+        engine = CachedTtsEngine(inner, TtsCache(max_entries=4))
+        asyncio.run(engine.synthesize("Xin chào", VOICE_FEMALE))
+        asyncio.run(engine.synthesize("Xin chào", VOICE_MALE))
+        self.assertEqual(len(inner.calls), 2, "khác giọng thì phải tổng hợp riêng")
+
+    def test_stream_yields_cached_audio_without_calling_inner(self):
+        inner = FakeTts(chunks=[b"PART1", b"PART2"])
+        engine = CachedTtsEngine(inner, TtsCache(max_entries=4))
+        # Nạp đệm trước.
+        asyncio.run(engine.synthesize("Xin chào", VOICE_FEMALE))
+        inner.calls.clear()
+
+        async def collect():
+            return [chunk async for chunk in engine.stream("Xin chào", VOICE_FEMALE)]
+
+        chunks = asyncio.run(collect())
+        self.assertEqual(chunks, [b"MP3DATA"], "có đệm thì phát ngay một khối")
+        self.assertEqual(inner.calls, [], "không được gọi lại engine")
+
+    def test_stream_falls_through_to_inner_when_not_cached(self):
+        inner = FakeTts(chunks=[b"PART1", b"PART2"])
+        engine = CachedTtsEngine(inner, TtsCache(max_entries=4))
+
+        async def collect():
+            return [chunk async for chunk in engine.stream("Câu mới", VOICE_FEMALE)]
+
+        chunks = asyncio.run(collect())
+        self.assertEqual(chunks, [b"PART1", b"PART2"])
+        self.assertEqual(len(inner.calls), 1)
+
+
+class WrapTtsCacheTests(unittest.TestCase):
+    def test_wraps_engine_when_enabled(self):
+        inner = FakeTts()
+        wrapped, cache = wrap_tts_cache(inner, Settings(tts_cache_entries=4))
+        self.assertIsInstance(wrapped, CachedTtsEngine)
+        self.assertTrue(cache.enabled)
+
+    def test_returns_engine_unchanged_when_disabled(self):
+        inner = FakeTts()
+        wrapped, cache = wrap_tts_cache(inner, Settings(tts_cache_entries=0))
+        self.assertIs(wrapped, inner, "tắt đệm thì trả đúng engine gốc, không bọc thừa")
+        self.assertFalse(cache.enabled)
+
+
+class HealthCacheTests(unittest.TestCase):
+    def test_health_reports_tts_cache_stats(self):
+        settings = Settings(tts_cache_entries=4)
+        engines = Engines(tts=FakeTts(), stt=FakeStt())
+        cache = TtsCache(4)
+        wrapped = CachedTtsEngine(engines.tts, cache)
+        app = create_app(settings=settings, engines=Engines(tts=wrapped, stt=engines.stt), tts_cache=cache)
+        client = TestClient(app)
+
+        client.post("/api/tts", data={"text": "a"})
+        client.post("/api/tts", data={"text": "a"})
+        body = client.get("/api/health").json()
+
+        self.assertEqual(body["ttsCache"]["entries"], 1)
+        self.assertEqual(body["ttsCache"]["hits"], 1)
+
+    def test_health_reports_null_when_cache_injected_as_none(self):
+        client, _ = build_client()
+        self.assertIsNone(client.get("/api/health").json()["ttsCache"])
+
+
+if __name__ == "__main__":
+    unittest.main()

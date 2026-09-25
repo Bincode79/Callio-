@@ -1,0 +1,14 @@
+# Backend giọng nói của Callio.
+#
+# Chỉ cần cho tính năng đọc/nghe thật; frontend vẫn chạy được nếu không cài
+# (khi đó giao diện tự lùi về Web Speech API của trình duyệt).
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+
+# TTS tiếng Việt miễn phí, không cần API key.
+edge-tts>=6.1
+
+# STT tiếng Việt chạy cục bộ, mã nguồn mở. Lần chạy đầu sẽ tải model (~500MB
+# cho "small"); đổi bằng CALLIO_WHISPER_MODEL=tiny|base|small|medium.
+faster-whisper>=1.0

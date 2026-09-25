@@ -1,50 +1,52 @@
-# React + TypeScript + Vite
+# Callio
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Ứng dụng demo bộ sản phẩm quản lý kinh doanh và chăm sóc khách hàng của Callio,
+gồm trang giới thiệu và ứng dụng vận hành dùng được thật (dữ liệu giả lập).
 
-Currently, two official plugins are available:
+## Công nghệ
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react/README.md) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- React 18 + TypeScript
+- Vite 6
+- Tailwind CSS 3
+- Biome (lint + format)
 
-## Expanding the ESLint configuration
+## Chạy dự án
 
-If you are developing a production application, we recommend updating the configuration to enable type aware lint rules:
-
-- Configure the top-level `parserOptions` property like this:
-
-```js
-export default tseslint.config({
-  languageOptions: {
-    // other options...
-    parserOptions: {
-      project: ['./tsconfig.node.json', './tsconfig.app.json'],
-      tsconfigRootDir: import.meta.dirname,
-    },
-  },
-})
+```bash
+npm install
+npm run dev
 ```
 
-- Replace `tseslint.configs.recommended` to `tseslint.configs.recommendedTypeChecked` or `tseslint.configs.strictTypeChecked`
-- Optionally add `...tseslint.configs.stylisticTypeChecked`
-- Install [eslint-plugin-react](https://github.com/jsx-eslint/eslint-plugin-react) and update the config:
+Dev server chạy tại `http://localhost:12000`.
 
-```js
-// eslint.config.js
-import react from 'eslint-plugin-react'
+Các câu lệnh khác:
 
-export default tseslint.config({
-  // Set the react version
-  settings: { react: { version: '18.3' } },
-  plugins: {
-    // Add the react plugin
-    react,
-  },
-  rules: {
-    // other rules...
-    // Enable its recommended rules
-    ...react.configs.recommended.rules,
-    ...react.configs['jsx-runtime'].rules,
-  },
-})
+```bash
+npm run build    # kiểm tra kiểu và build ra thư mục dist
+npm test         # chạy test cho engine gọi AI
+npm run preview  # xem thử bản build
+npm run lint     # kiểm tra kiểu + lint và tự sửa
+npm run format   # định dạng mã nguồn
 ```
+
+## Cấu trúc màn hình
+
+Trang giới thiệu hiển thị ở địa chỉ gốc. Ứng dụng vận hành nằm dưới tiền tố
+`#/app`:
+
+| Màn hình | Đường dẫn | Nội dung |
+| --- | --- | --- |
+| Tổng quan | `#/app/tong-quan` | Chỉ số KPI, lưu lượng cuộc gọi theo giờ, cơ cấu kênh, phễu chuyển đổi, dòng hoạt động hợp nhất |
+| ACRM | `#/app/crm` | Danh sách khách hàng, bộ lọc, hồ sơ Customer 360 kèm hành trình tương tác đa kênh |
+| Đa kênh | `#/app/da-kenh` | Hộp thư tập trung Zalo, Facebook, Email, SMS, Website và cuộc gọi; trả lời, phân công, xử lý theo SLA |
+| Tổng đài | `#/app/tong-dai` | Softphone trực tiếp, hiệu suất hàng đợi, trạng thái nhân viên, nhật ký cuộc gọi và bản ghi âm |
+| Callbot AI | `#/app/callbot` | Quản lý chiến dịch gọi tự động, trình thiết kế kịch bản, kết quả cuộc gọi và phiên âm |
+| Telesales | `#/app/telesales` | Hàng đợi cuộc gọi ưu tiên, dialer trên màn hình, kịch bản gợi ý, ghi nhận kết quả và pipeline |
+| Nhắn tin | `#/app/nhan-tin` | Hiệu quả chiến dịch, thư viện mẫu tin, trình soạn tin kèm xem trước trên điện thoại |
+| Ulead & Uflow | `#/app/ulead-uflow` | Kho lead với chấm điểm AI và luật chia tự động, trình thiết kế quy trình dạng sơ đồ |
+
+## Ghi chú
+
+Dữ liệu trong ứng dụng là dữ liệu giả lập sinh tất định, không lưu lại sau khi
+tải lại trang và chưa kết nối backend. Tham khảo `AGENTS.md` để biết thêm về
+kiến trúc và quy ước mã nguồn.
